@@ -67,9 +67,6 @@ python train.py -c <YOUR_CONFIG>.yaml
 
 ## 🤖 Deployment
 
-> [!WARNING]
-> <span style="color:red">The deployment code is still being refactored. There may be issues with the current code.</span>
-
 > [!NOTE]
 > The deployment code is based on [NoMaD's deployment code](https://github.com/robodhruv/visualnav-transformer/tree/main?tab=readme-ov-file#deployment). However, we move to ROS2 and use the [TurtleBot 4](https://turtlebot.github.io/turtlebot4-user-manual/) as the robot platform.
 
