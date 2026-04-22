@@ -7,7 +7,7 @@ use_wandb: False # set to false if you don't want to log to wandb
 train: False
 batch_size: 512
 eval_batch_size: 512
-epochs: 3
+epochs: 1
 gpu_ids: [0]
 num_workers: 8
 lr: 1e-4
