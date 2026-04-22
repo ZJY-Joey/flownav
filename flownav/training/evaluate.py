@@ -14,6 +14,7 @@ from flownav.training.logger import Logger
 from flownav.training.utils import (
     ACTION_STATS,
     compute_losses,
+    compute_selected_action_metrics,
     get_delta,
     normalize_data,
     visualize_action_distribution,
@@ -36,6 +37,8 @@ def evaluate(
     num_images_log: int = 8,
     eval_fraction: float = 0.25,
     use_wandb: bool = True,
+    selected_action_num_samples: int = 8,
+    selected_action_cluster_threshold: float = 0.35,
 ):
     # Clip goal mask probability
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
@@ -65,6 +68,20 @@ def evaluate(
     gc_multi_action_waypts_cos_sim_logger = Logger(
         "gc_multi_action_waypts_cos_sim", eval_type, window_size=print_log_freq
     )
+    selected_gc_action_loss_logger = Logger(
+        "selected_gc_action_loss", eval_type, window_size=print_log_freq
+    )
+    selected_gc_action_waypts_cos_sim_logger = Logger(
+        "selected_gc_action_waypts_cos_sim", eval_type, window_size=print_log_freq
+    )
+    selected_gc_multi_action_waypts_cos_sim_logger = Logger(
+        "selected_gc_multi_action_waypts_cos_sim",
+        eval_type,
+        window_size=print_log_freq,
+    )
+    selected_gc_cluster_size_logger = Logger(
+        "selected_gc_cluster_size", eval_type, window_size=print_log_freq
+    )
     loggers = {
         "uc_action_loss": uc_action_loss_logger,
         "uc_action_waypts_cos_sim": uc_action_waypts_cos_sim_logger,
@@ -73,6 +90,10 @@ def evaluate(
         "gc_action_loss": gc_action_loss_logger,
         "gc_action_waypts_cos_sim": gc_action_waypts_cos_sim_logger,
         "gc_multi_action_waypts_cos_sim": gc_multi_action_waypts_cos_sim_logger,
+        "selected_gc_action_loss": selected_gc_action_loss_logger,
+        "selected_gc_action_waypts_cos_sim": selected_gc_action_waypts_cos_sim_logger,
+        "selected_gc_multi_action_waypts_cos_sim": selected_gc_multi_action_waypts_cos_sim_logger,
+        "selected_gc_cluster_size": selected_gc_cluster_size_logger,
     }
     num_batches = max(int(num_batches * eval_fraction), 1)
 
@@ -204,6 +225,18 @@ def evaluate(
                     action_mask=action_mask.to(device),
                     use_wandb=use_wandb,
                 )
+                selected_metrics = compute_selected_action_metrics(
+                    ema_model=ema_model,
+                    batch_obs_images=batch_obs_images,
+                    batch_goal_images=batch_goal_images,
+                    batch_action_label=actions.to(device),
+                    device=device,
+                    action_mask=action_mask.to(device),
+                    use_wandb=use_wandb,
+                    num_action_samples=selected_action_num_samples,
+                    cluster_threshold=selected_action_cluster_threshold,
+                )
+                losses.update(selected_metrics)
 
                 for key, value in losses.items():
                     if key in loggers:

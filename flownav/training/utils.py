@@ -276,6 +276,77 @@ def compute_losses(
     return results
 
 
+def compute_selected_action_metrics(
+    ema_model: EMAModel,
+    batch_obs_images: torch.Tensor,
+    batch_goal_images: torch.Tensor,
+    batch_action_label: torch.Tensor,
+    device: torch.device,
+    action_mask: torch.Tensor,
+    use_wandb: bool,
+    num_action_samples: int = 8,
+    cluster_threshold: float = 0.35,
+) -> dict[str, torch.Tensor]:
+    pred_horizon = batch_action_label.shape[1]
+    action_dim = batch_action_label.shape[2]
+    batch_size = batch_action_label.shape[0]
+
+    model_output_dict = model_output(
+        model=ema_model,
+        batch_obs_images=batch_obs_images,
+        batch_goal_images=batch_goal_images,
+        pred_horizon=pred_horizon,
+        action_dim=action_dim,
+        num_samples=num_action_samples,
+        device=device,
+        use_wandb=use_wandb,
+    )
+    gc_actions = model_output_dict["gc_actions"].reshape(
+        batch_size, num_action_samples, pred_horizon, action_dim
+    )
+
+    selected_gc_actions = []
+    selected_cluster_sizes = []
+    for batch_idx in range(batch_size):
+        cluster_info = cluster_trajectory_samples(
+            to_numpy(gc_actions[batch_idx]),
+            distance_threshold=cluster_threshold,
+        )
+        selected_gc_actions.append(cluster_info["selected_trajectory"])
+        selected_cluster_sizes.append(len(cluster_info["selected_cluster"]))
+
+    selected_gc_actions = from_numpy(np.stack(selected_gc_actions, axis=0)).to(device)
+    selected_cluster_sizes = from_numpy(
+        np.array(selected_cluster_sizes, dtype=np.float32)
+    ).to(device)
+
+    selected_gc_action_loss = action_reduce(
+        F.mse_loss(selected_gc_actions, batch_action_label, reduction="none"),
+        action_mask,
+    )
+    selected_gc_action_waypts_cos_sim = action_reduce(
+        F.cosine_similarity(
+            selected_gc_actions[:, :, :2], batch_action_label[:, :, :2], dim=-1
+        ),
+        action_mask,
+    )
+    selected_gc_multi_action_waypts_cos_sim = action_reduce(
+        F.cosine_similarity(
+            torch.flatten(selected_gc_actions[:, :, :2], start_dim=1),
+            torch.flatten(batch_action_label[:, :, :2], start_dim=1),
+            dim=-1,
+        ),
+        action_mask,
+    )
+
+    return {
+        "selected_gc_action_loss": selected_gc_action_loss,
+        "selected_gc_action_waypts_cos_sim": selected_gc_action_waypts_cos_sim,
+        "selected_gc_multi_action_waypts_cos_sim": selected_gc_multi_action_waypts_cos_sim,
+        "selected_gc_cluster_size": selected_cluster_sizes.mean(),
+    }
+
+
 def normalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
     ndata = (data - stats["min"]) / (stats["max"] - stats["min"])
     ndata = ndata * 2 - 1

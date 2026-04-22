@@ -124,3 +124,5 @@ pairwise_test_freq: 0 # in epochs
 eval_fraction: 1.0
 wandb_log_freq: 10 # in iterations
 eval_freq: 1 # in epochs
+selected_action_num_samples: 8
+selected_action_cluster_threshold: 0.35

@@ -238,6 +238,8 @@ def main(config: dict) -> None:
         use_wandb=config["use_wandb"],
         eval_fraction=config["eval_fraction"],
         eval_freq=config["eval_freq"],
+        selected_action_num_samples=config["selected_action_num_samples"],
+        selected_action_cluster_threshold=config["selected_action_cluster_threshold"],
     )
     click.echo(
         click.style(

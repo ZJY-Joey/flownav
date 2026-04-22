@@ -34,6 +34,8 @@ def main_loop(
     use_wandb: bool = True,
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
+    selected_action_num_samples: int = 8,
+    selected_action_cluster_threshold: float = 0.35,
 ) -> None:
     # Set saving paths
     latest_path = os.path.join(project_folder, "latest.pth")
@@ -111,6 +113,8 @@ def main_loop(
                     wandb_log_freq=wandb_log_freq,
                     use_wandb=use_wandb,
                     eval_fraction=eval_fraction,
+                    selected_action_num_samples=selected_action_num_samples,
+                    selected_action_cluster_threshold=selected_action_cluster_threshold,
                 )
 
         # Log the current learning rate
