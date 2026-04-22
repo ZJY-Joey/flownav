@@ -49,6 +49,19 @@ def weighted_trajectory_distance_matrix(
     return np.sum(pointwise * waypoint_weights[None, None, :], axis=-1)
 
 
+def weighted_trajectory_distance(
+    trajectory_a: np.ndarray,
+    trajectory_b: np.ndarray,
+    waypoint_weights: np.ndarray | None = None,
+) -> float:
+    stacked = np.stack([trajectory_a, trajectory_b], axis=0)
+    return float(
+        weighted_trajectory_distance_matrix(
+            stacked, waypoint_weights=waypoint_weights
+        )[0, 1]
+    )
+
+
 def cluster_trajectory_samples(
     trajectories: np.ndarray,
     distance_threshold: float = 0.35,
@@ -101,6 +114,68 @@ def cluster_trajectory_samples(
         "selected_trajectory": trajectories[medoid_idx],
         "distance_matrix": distance_matrix,
     }
+
+
+def select_consistent_clustered_trajectory(
+    trajectories: np.ndarray,
+    previous_trajectory: np.ndarray | None = None,
+    distance_threshold: float = 0.35,
+    consistency_threshold: float | None = None,
+    waypoint_weights: np.ndarray | None = None,
+) -> dict:
+    cluster_info = cluster_trajectory_samples(
+        trajectories,
+        distance_threshold=distance_threshold,
+        waypoint_weights=waypoint_weights,
+    )
+    if previous_trajectory is None:
+        cluster_info["selection_reason"] = "largest_cluster"
+        cluster_info["previous_distance"] = None
+        return cluster_info
+
+    if consistency_threshold is None:
+        consistency_threshold = distance_threshold * 1.5
+
+    best_cluster = cluster_info["selected_cluster"]
+    best_distance = None
+    best_index = cluster_info["selected_index"]
+
+    for cluster in cluster_info["clusters"]:
+        cluster_dist = cluster_info["distance_matrix"][np.ix_(cluster, cluster)]
+        medoid_local_idx = int(np.argmin(cluster_dist.sum(axis=1)))
+        candidate_index = int(cluster[medoid_local_idx])
+        candidate_trajectory = trajectories[candidate_index]
+        distance_to_previous = weighted_trajectory_distance(
+            candidate_trajectory,
+            previous_trajectory,
+            waypoint_weights=waypoint_weights,
+        )
+        if distance_to_previous <= consistency_threshold and (
+            best_distance is None or distance_to_previous < best_distance
+        ):
+            best_cluster = cluster
+            best_distance = distance_to_previous
+            best_index = candidate_index
+
+    cluster_info["selected_cluster"] = best_cluster
+    cluster_info["selected_index"] = best_index
+    cluster_info["selected_trajectory"] = trajectories[best_index]
+    cluster_info["previous_distance"] = best_distance
+    cluster_info["selection_reason"] = (
+        "consistent_cluster" if best_distance is not None else "largest_cluster"
+    )
+    return cluster_info
+
+
+def ema_smooth_waypoint(
+    current_waypoint: np.ndarray,
+    previous_waypoint: np.ndarray | None = None,
+    ema_decay: float = 0.6,
+) -> np.ndarray:
+    if previous_waypoint is None:
+        return current_waypoint
+    ema_decay = float(np.clip(ema_decay, 0.0, 0.999))
+    return ema_decay * previous_waypoint + (1.0 - ema_decay) * current_waypoint
 
 
 def action_reduce(

@@ -26,7 +26,12 @@ from topic_names import (IMAGE_TOPIC,
                         REACHED_GOAL_TOPIC)
 
 # Custom Imports
-from flownav.training.utils import get_action, cluster_trajectory_samples
+from flownav.training.utils import (
+    cluster_trajectory_samples,
+    ema_smooth_waypoint,
+    get_action,
+    select_consistent_clustered_trajectory,
+)
 from utils import to_numpy, transform_images, load_model
 
 
@@ -58,6 +63,8 @@ class NavigationNode(Node):
 
         self.cur_img = None
         self.cur_naction = None
+        self.prev_selected_action = None
+        self.prev_waypoint_ema = None
 
         self.k_steps = args.k_steps
 
@@ -219,15 +226,25 @@ class NavigationNode(Node):
                 sampled_actions_msg.data = message_data.tolist()
                 print("published sampled actions")
                 self.sampled_actions_pub.publish(sampled_actions_msg)
-                cluster_info = cluster_trajectory_samples(
+                cluster_info = select_consistent_clustered_trajectory(
                     naction,
+                    previous_trajectory=self.prev_selected_action,
                     distance_threshold=args.cluster_threshold,
+                    consistency_threshold=args.consistency_threshold,
                 )
                 selected_action = cluster_info["selected_trajectory"]
                 chosen_waypoint = selected_action[args.waypoint]
+                self.prev_selected_action = selected_action.copy()
+                chosen_waypoint = ema_smooth_waypoint(
+                    chosen_waypoint,
+                    previous_waypoint=self.prev_waypoint_ema,
+                    ema_decay=args.waypoint_ema_decay,
+                )
+                self.prev_waypoint_ema = chosen_waypoint.copy()
                 print(
                     f"Selected cluster size: {len(cluster_info['selected_cluster'])}/{len(naction)} "
-                    f"medoid index: {cluster_info['selected_index']}"
+                    f"medoid index: {cluster_info['selected_index']} "
+                    f"reason: {cluster_info['selection_reason']}"
                 )
             
         waypoint_msg = Float32MultiArray()
@@ -329,6 +346,18 @@ if __name__ == "__main__":
         default=0.35,
         type=float,
         help="Distance threshold for trajectory clustering in action space.",
+    )
+    parser.add_argument(
+        "--consistency-threshold",
+        default=0.5,
+        type=float,
+        help="Maximum trajectory distance to keep selecting the same mode across frames.",
+    )
+    parser.add_argument(
+        "--waypoint-ema-decay",
+        default=0.6,
+        type=float,
+        help="EMA decay for smoothing the final published waypoint.",
     )
     parser.add_argument(
         "--exp_dir",

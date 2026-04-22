@@ -19,7 +19,13 @@ from torchvision import transforms
 from flownav.data.data_utils import img_path_to_data
 from flownav.models.nomad import DenseNetwork, NoMaD
 from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
-from flownav.training.utils import cluster_trajectory_samples, model_output, to_numpy
+from flownav.training.utils import (
+    cluster_trajectory_samples,
+    ema_smooth_waypoint,
+    model_output,
+    select_consistent_clustered_trajectory,
+    to_numpy,
+)
 from flownav.visualizing.plot import plot_trajs_and_points
 
 try:
@@ -172,6 +178,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.35,
         help="Distance threshold for trajectory clustering in action space.",
+    )
+    parser.add_argument(
+        "--consistency-threshold",
+        type=float,
+        default=0.5,
+        help="Maximum trajectory distance to keep selecting the same mode across frames.",
+    )
+    parser.add_argument(
+        "--waypoint-ema-decay",
+        type=float,
+        default=0.6,
+        help="EMA decay for smoothing the selected live waypoint trajectory.",
     )
     return parser.parse_args()
 
@@ -794,10 +812,14 @@ class FlowNavLiveNode(Node):
         self.latest_rgb_frame: Optional[np.ndarray] = None
         self.latest_overlay_waypoints: Optional[np.ndarray] = None
         self.latest_gc_distance: Optional[float] = None
+        self.latest_selection_reason: Optional[str] = None
         self.latest_frame_time = 0.0
         self.latest_inference_time = 0.0
         self.frame_version = 0
         self.last_processed_frame_version = -1
+        self.prev_selected_gc_trajectory: Optional[np.ndarray] = None
+        self.prev_selected_uc_trajectory: Optional[np.ndarray] = None
+        self.prev_waypoint_ema: Optional[np.ndarray] = None
         self.inference_durations_ms: deque[float] = deque(maxlen=30)
         self.inference_timestamps: deque[float] = deque(maxlen=30)
         self.latest_inference_ms: Optional[float] = None
@@ -862,6 +884,7 @@ class FlowNavLiveNode(Node):
                 else np.array(self.latest_overlay_waypoints, copy=True)
             )
             gc_distance = self.latest_gc_distance
+            selection_reason = self.latest_selection_reason
             latest_inference_ms = self.latest_inference_ms
             latest_inference_hz = self.latest_inference_hz
             latest_inference_fps_from_ms = self.latest_inference_fps_from_ms
@@ -893,14 +916,17 @@ class FlowNavLiveNode(Node):
         else:
             overlay_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
+        overlay_text_color = (100, 230, 100)
+        overlay_font_scale = 0.7
+        overlay_font_thickness = 2
         cv2.putText(
             overlay_bgr,
             f"mode={self.args.live_mode} frames={len(self.obs_queue)}/{self.expected_obs}",
             (20, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (255, 255, 255),
-            2,
+            overlay_font_scale,
+            overlay_text_color,
+            overlay_font_thickness,
             cv2.LINE_AA,
         )
         if gc_distance is not None:
@@ -909,31 +935,42 @@ class FlowNavLiveNode(Node):
                 f"gc_dist={gc_distance:.2f}",
                 (20, 75),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2,
+                overlay_font_scale,
+                overlay_text_color,
+                overlay_font_thickness,
+                cv2.LINE_AA,
+            )
+        if selection_reason is not None:
+            cv2.putText(
+                overlay_bgr,
+                f"selection={selection_reason}",
+                (20, 115),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                overlay_font_scale,
+                overlay_text_color,
+                overlay_font_thickness,
                 cv2.LINE_AA,
             )
         if latest_inference_ms is not None and latest_inference_fps_from_ms is not None:
             cv2.putText(
                 overlay_bgr,
                 f"infer_fps={latest_inference_fps_from_ms:.2f} avg_fps={avg_inference_fps:.2f}",
-                (20, 115),
+                (20, 155),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2,
+                overlay_font_scale,
+                overlay_text_color,
+                overlay_font_thickness,
                 cv2.LINE_AA,
             )
         if latest_inference_hz is not None:
             cv2.putText(
                 overlay_bgr,
                 f"loop_fps={latest_inference_hz:.2f}",
-                (20, 155),
+                (20, 195),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2,
+                overlay_font_scale,
+                overlay_text_color,
+                overlay_font_thickness,
                 cv2.LINE_AA,
             )
 
@@ -995,9 +1032,41 @@ class FlowNavLiveNode(Node):
                     device=self.device,
                     use_wandb=False,
                 )
-                selected_waypoints = choose_live_waypoints(
-                    outputs, self.args.live_mode, self.args.cluster_threshold
+                gc_actions = to_numpy(outputs["gc_actions"])
+                uc_actions = to_numpy(outputs["uc_actions"])
+                selection_reason = None
+                if self.args.live_mode == "gc_cluster":
+                    cluster_info = select_consistent_clustered_trajectory(
+                        gc_actions,
+                        previous_trajectory=self.prev_selected_gc_trajectory,
+                        distance_threshold=self.args.cluster_threshold,
+                        consistency_threshold=self.args.consistency_threshold,
+                    )
+                    selected_waypoints = cluster_info["selected_trajectory"]
+                    self.prev_selected_gc_trajectory = selected_waypoints.copy()
+                    selection_reason = cluster_info["selection_reason"]
+                elif self.args.live_mode == "uc_cluster":
+                    cluster_info = select_consistent_clustered_trajectory(
+                        uc_actions,
+                        previous_trajectory=self.prev_selected_uc_trajectory,
+                        distance_threshold=self.args.cluster_threshold,
+                        consistency_threshold=self.args.consistency_threshold,
+                    )
+                    selected_waypoints = cluster_info["selected_trajectory"]
+                    self.prev_selected_uc_trajectory = selected_waypoints.copy()
+                    selection_reason = cluster_info["selection_reason"]
+                else:
+                    selected_waypoints = choose_live_waypoints(
+                        outputs, self.args.live_mode, self.args.cluster_threshold
+                    )
+                    selection_reason = "direct_selection"
+
+                selected_waypoints = ema_smooth_waypoint(
+                    selected_waypoints,
+                    previous_waypoint=self.prev_waypoint_ema,
+                    ema_decay=self.args.waypoint_ema_decay,
                 )
+                self.prev_waypoint_ema = selected_waypoints.copy()
                 gc_distance = float(to_numpy(outputs["gc_distance"]).reshape(-1)[0])
                 infer_ms = (time.perf_counter() - infer_start) * 1000.0
                 infer_fps = 1000.0 / max(infer_ms, 1e-6)
@@ -1006,6 +1075,7 @@ class FlowNavLiveNode(Node):
                 with self.frame_lock:
                     self.latest_overlay_waypoints = selected_waypoints
                     self.latest_gc_distance = gc_distance
+                    self.latest_selection_reason = selection_reason
                     self.inference_durations_ms.append(infer_ms)
                     self.inference_timestamps.append(now_ts)
                     self.latest_inference_ms = infer_ms
@@ -1030,6 +1100,7 @@ class FlowNavLiveNode(Node):
                         if actual_hz is None
                         else f" loop_fps={actual_hz:.2f}"
                     )
+                    + f" selection={selection_reason}"
                 )
             except Exception as e:
                 self.get_logger().error(f"Live inference failed: {e}")
