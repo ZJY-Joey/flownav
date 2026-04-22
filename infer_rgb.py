@@ -112,13 +112,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--inference-hz",
         type=float,
-        default=6.0,
-        help="Live ROS2 inference frequency.",
+        default=0.0,
+        help="Live ROS2 inference frequency limit. Set <=0 to disable throttling.",
     )
     parser.add_argument(
         "--display-scale",
         type=float,
-        default=0.75,
+        default=1.2,
         help="Scale factor for the live OpenCV window.",
     )
     parser.add_argument(
@@ -796,13 +796,17 @@ class FlowNavLiveNode(Node):
         self.latest_gc_distance: Optional[float] = None
         self.latest_frame_time = 0.0
         self.latest_inference_time = 0.0
+        self.frame_version = 0
+        self.last_processed_frame_version = -1
         self.inference_durations_ms: deque[float] = deque(maxlen=30)
         self.inference_timestamps: deque[float] = deque(maxlen=30)
         self.latest_inference_ms: Optional[float] = None
         self.latest_inference_hz: Optional[float] = None
+        self.latest_inference_fps_from_ms: Optional[float] = None
         self.shutdown_requested = False
         self.window_name = args.window_name
         self.display_scale = args.display_scale
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         self.video_writer = (
             LiveOverlayWriter(args.save_video, max(args.inference_hz, 1.0))
             if args.save_video
@@ -835,6 +839,7 @@ class FlowNavLiveNode(Node):
                 self.obs_queue.append(frame_tensor)
                 self.latest_rgb_frame = frame_rgb
                 self.latest_frame_time = time.time()
+                self.frame_version += 1
 
             self.render_latest_frame()
         except Exception as e:
@@ -859,10 +864,16 @@ class FlowNavLiveNode(Node):
             gc_distance = self.latest_gc_distance
             latest_inference_ms = self.latest_inference_ms
             latest_inference_hz = self.latest_inference_hz
+            latest_inference_fps_from_ms = self.latest_inference_fps_from_ms
             avg_inference_ms = (
                 None
                 if not self.inference_durations_ms
                 else float(np.mean(self.inference_durations_ms))
+            )
+            avg_inference_fps = (
+                None
+                if avg_inference_ms is None or avg_inference_ms <= 1e-6
+                else 1000.0 / avg_inference_ms
             )
 
         if waypoints is not None:
@@ -903,10 +914,10 @@ class FlowNavLiveNode(Node):
                 2,
                 cv2.LINE_AA,
             )
-        if latest_inference_ms is not None:
+        if latest_inference_ms is not None and latest_inference_fps_from_ms is not None:
             cv2.putText(
                 overlay_bgr,
-                f"infer={latest_inference_ms:.1f}ms avg={avg_inference_ms:.1f}ms",
+                f"infer_fps={latest_inference_fps_from_ms:.2f} avg_fps={avg_inference_fps:.2f}",
                 (20, 115),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
@@ -917,7 +928,7 @@ class FlowNavLiveNode(Node):
         if latest_inference_hz is not None:
             cv2.putText(
                 overlay_bgr,
-                f"actual_hz={latest_inference_hz:.2f}",
+                f"loop_fps={latest_inference_hz:.2f}",
                 (20, 155),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
@@ -948,20 +959,24 @@ class FlowNavLiveNode(Node):
         while rclpy.ok() and not self.shutdown_requested:
             try:
                 now = time.time()
-                interval = 1.0 / max(self.args.inference_hz, 1e-3)
-                if now - self.latest_inference_time < interval:
-                    time.sleep(0.01)
-                    continue
+                if self.args.inference_hz > 0:
+                    interval = 1.0 / self.args.inference_hz
+                    if now - self.latest_inference_time < interval:
+                        time.sleep(0.005)
+                        continue
 
                 with self.frame_lock:
                     if len(self.obs_queue) < self.expected_obs:
                         obs_stack = None
+                    elif self.frame_version == self.last_processed_frame_version:
+                        obs_stack = None
                     else:
                         obs_stack = torch.cat(list(self.obs_queue), dim=0).unsqueeze(0)
                         self.latest_inference_time = now
+                        self.last_processed_frame_version = self.frame_version
 
                 if obs_stack is None:
-                    time.sleep(0.01)
+                    time.sleep(0.005)
                     continue
 
                 goal_batch = self.goal_batch.clone()
@@ -985,6 +1000,7 @@ class FlowNavLiveNode(Node):
                 )
                 gc_distance = float(to_numpy(outputs["gc_distance"]).reshape(-1)[0])
                 infer_ms = (time.perf_counter() - infer_start) * 1000.0
+                infer_fps = 1000.0 / max(infer_ms, 1e-6)
                 now_ts = time.time()
 
                 with self.frame_lock:
@@ -993,6 +1009,7 @@ class FlowNavLiveNode(Node):
                     self.inference_durations_ms.append(infer_ms)
                     self.inference_timestamps.append(now_ts)
                     self.latest_inference_ms = infer_ms
+                    self.latest_inference_fps_from_ms = infer_fps
                     if len(self.inference_timestamps) >= 2:
                         total_dt = (
                             self.inference_timestamps[-1]
@@ -1003,13 +1020,15 @@ class FlowNavLiveNode(Node):
                                 (len(self.inference_timestamps) - 1) / total_dt
                             )
                     avg_infer_ms = float(np.mean(self.inference_durations_ms))
+                    avg_infer_fps = 1000.0 / max(avg_infer_ms, 1e-6)
                     actual_hz = self.latest_inference_hz
                 self.get_logger().info(
-                    f"[perf] infer={infer_ms:.1f}ms avg={avg_infer_ms:.1f}ms"
+                    f"[perf] infer_fps={infer_fps:.2f} avg_fps={avg_infer_fps:.2f} "
+                    f"(infer={infer_ms:.1f}ms avg={avg_infer_ms:.1f}ms)"
                     + (
                         ""
                         if actual_hz is None
-                        else f" actual_hz={actual_hz:.2f}"
+                        else f" loop_fps={actual_hz:.2f}"
                     )
                 )
             except Exception as e:
