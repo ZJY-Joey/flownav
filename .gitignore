@@ -154,3 +154,5 @@ dmypy.json
 deployment/src/test/*
 deployment/src/explore_topomap/*
 conditional-flow-matching/
+*.mp4
+*.webm

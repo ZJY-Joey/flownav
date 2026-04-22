@@ -19,7 +19,7 @@ from torchvision import transforms
 from flownav.data.data_utils import img_path_to_data
 from flownav.models.nomad import DenseNetwork, NoMaD
 from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
-from flownav.training.utils import model_output, to_numpy
+from flownav.training.utils import cluster_trajectory_samples, model_output, to_numpy
 from flownav.visualizing.plot import plot_trajs_and_points
 
 try:
@@ -163,9 +163,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--live-mode",
-        choices=["gc_mean", "gc_first", "uc_mean", "uc_first"],
-        default="gc_mean",
+        choices=["gc_cluster", "uc_cluster", "gc_mean", "gc_first", "uc_mean", "uc_first"],
+        default="gc_cluster",
         help="Which predicted trajectory to project in live mode.",
+    )
+    parser.add_argument(
+        "--cluster-threshold",
+        type=float,
+        default=0.35,
+        help="Distance threshold for trajectory clustering in action space.",
     )
     return parser.parse_args()
 
@@ -640,6 +646,12 @@ def save_outputs(
     uc_actions: np.ndarray,
     gc_actions: np.ndarray,
     gc_distance: np.ndarray,
+    selected_uc: np.ndarray,
+    selected_gc: np.ndarray,
+    selected_uc_index: int,
+    selected_gc_index: int,
+    selected_uc_cluster_size: int,
+    selected_gc_cluster_size: int,
     viz_obs: np.ndarray,
     viz_goal: np.ndarray,
 ) -> None:
@@ -648,6 +660,8 @@ def save_outputs(
     np.save(os.path.join(output_dir, "uc_actions.npy"), uc_actions)
     np.save(os.path.join(output_dir, "gc_actions.npy"), gc_actions)
     np.save(os.path.join(output_dir, "gc_distance.npy"), gc_distance)
+    np.save(os.path.join(output_dir, "selected_uc.npy"), selected_uc)
+    np.save(os.path.join(output_dir, "selected_gc.npy"), selected_gc)
 
     metadata = {
         **source_info,
@@ -656,6 +670,10 @@ def save_outputs(
         "gc_actions_shape": list(gc_actions.shape),
         "gc_distance_shape": list(gc_distance.shape),
         "gc_distance_values": gc_distance.reshape(-1).tolist(),
+        "selected_uc_index": selected_uc_index,
+        "selected_gc_index": selected_gc_index,
+        "selected_uc_cluster_size": selected_uc_cluster_size,
+        "selected_gc_cluster_size": selected_gc_cluster_size,
     }
     with open(os.path.join(output_dir, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
@@ -663,18 +681,36 @@ def save_outputs(
     fig, ax = plt.subplots(1, 3, figsize=(18.5, 10.5))
     plot_trajs_and_points(
         ax=ax[0],
-        list_trajs=np.concatenate([uc_actions, gc_actions], axis=0),
+        list_trajs=np.concatenate(
+            [uc_actions, gc_actions, selected_uc[None], selected_gc[None]], axis=0
+        ),
         list_points=[np.array([0.0, 0.0])],
-        traj_colors=(["red"] * len(uc_actions)) + (["green"] * len(gc_actions)),
+        traj_colors=(
+            (["red"] * len(uc_actions))
+            + (["green"] * len(gc_actions))
+            + ["orange", "blue"]
+        ),
         point_colors=["blue"],
-        traj_labels=None,
+        traj_labels=(
+            (["UC samples"] * len(uc_actions))
+            + (["GC samples"] * len(gc_actions))
+            + ["selected UC"]
+            + ["selected GC"]
+        ),
         point_labels=["robot"],
-        traj_alphas=([0.2] * len(uc_actions)) + ([0.35] * len(gc_actions)),
+        traj_alphas=(
+            ([0.2] * len(uc_actions))
+            + ([0.15] * len(gc_actions))
+            + [1.0, 1.0]
+        ),
         point_alphas=[1.0],
         quiver_freq=0,
     )
     ax[0].set_title(
-        f"UC(red) / GC(green) trajectories\nGC distance mean={gc_distance.mean():.2f}"
+        "UC(red) / GC(green) samples\n"
+        f"selected UC(orange)={selected_uc_index} [{selected_uc_cluster_size}/{len(uc_actions)}], "
+        f"selected GC(blue)={selected_gc_index} [{selected_gc_cluster_size}/{len(gc_actions)}]\n"
+        f"GC distance mean={gc_distance.mean():.2f}"
     )
     ax[1].imshow(viz_obs)
     ax[1].set_title("Last observation frame")
@@ -687,18 +723,30 @@ def save_outputs(
     plt.close(fig)
 
 
-def choose_live_waypoints(outputs: Dict[str, torch.Tensor], mode: str) -> np.ndarray:
-    if mode == "gc_first":
-        waypoints = outputs["gc_actions"][0]
+def choose_live_waypoints(
+    outputs: Dict[str, torch.Tensor], mode: str, cluster_threshold: float
+) -> np.ndarray:
+    if mode == "gc_cluster":
+        waypoints = cluster_trajectory_samples(
+            to_numpy(outputs["gc_actions"]),
+            distance_threshold=cluster_threshold,
+        )["selected_trajectory"]
+    elif mode == "uc_cluster":
+        waypoints = cluster_trajectory_samples(
+            to_numpy(outputs["uc_actions"]),
+            distance_threshold=cluster_threshold,
+        )["selected_trajectory"]
+    elif mode == "gc_first":
+        waypoints = to_numpy(outputs["gc_actions"][0])
     elif mode == "gc_mean":
-        waypoints = outputs["gc_actions"].mean(dim=0)
+        waypoints = to_numpy(outputs["gc_actions"].mean(dim=0))
     elif mode == "uc_first":
-        waypoints = outputs["uc_actions"][0]
+        waypoints = to_numpy(outputs["uc_actions"][0])
     elif mode == "uc_mean":
-        waypoints = outputs["uc_actions"].mean(dim=0)
+        waypoints = to_numpy(outputs["uc_actions"].mean(dim=0))
     else:
         raise ValueError(f"Unsupported live mode: {mode}")
-    return to_numpy(waypoints)
+    return waypoints
 
 
 class LiveOverlayWriter:
@@ -748,6 +796,10 @@ class FlowNavLiveNode(Node):
         self.latest_gc_distance: Optional[float] = None
         self.latest_frame_time = 0.0
         self.latest_inference_time = 0.0
+        self.inference_durations_ms: deque[float] = deque(maxlen=30)
+        self.inference_timestamps: deque[float] = deque(maxlen=30)
+        self.latest_inference_ms: Optional[float] = None
+        self.latest_inference_hz: Optional[float] = None
         self.shutdown_requested = False
         self.window_name = args.window_name
         self.display_scale = args.display_scale
@@ -805,6 +857,13 @@ class FlowNavLiveNode(Node):
                 else np.array(self.latest_overlay_waypoints, copy=True)
             )
             gc_distance = self.latest_gc_distance
+            latest_inference_ms = self.latest_inference_ms
+            latest_inference_hz = self.latest_inference_hz
+            avg_inference_ms = (
+                None
+                if not self.inference_durations_ms
+                else float(np.mean(self.inference_durations_ms))
+            )
 
         if waypoints is not None:
             overlay_bgr = project_waypoints_to_fisheye_image_with_polygon_new(
@@ -838,6 +897,28 @@ class FlowNavLiveNode(Node):
                 overlay_bgr,
                 f"gc_dist={gc_distance:.2f}",
                 (20, 75),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if latest_inference_ms is not None:
+            cv2.putText(
+                overlay_bgr,
+                f"infer={latest_inference_ms:.1f}ms avg={avg_inference_ms:.1f}ms",
+                (20, 115),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if latest_inference_hz is not None:
+            cv2.putText(
+                overlay_bgr,
+                f"actual_hz={latest_inference_hz:.2f}",
+                (20, 155),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
                 (255, 255, 255),
@@ -888,6 +969,7 @@ class FlowNavLiveNode(Node):
                 obs_stack = obs_stack.to(self.device)
                 goal_batch = goal_batch.to(self.device)
 
+                infer_start = time.perf_counter()
                 outputs = model_output(
                     model=self.model,
                     batch_obs_images=obs_stack,
@@ -898,12 +980,38 @@ class FlowNavLiveNode(Node):
                     device=self.device,
                     use_wandb=False,
                 )
-                selected_waypoints = choose_live_waypoints(outputs, self.args.live_mode)
+                selected_waypoints = choose_live_waypoints(
+                    outputs, self.args.live_mode, self.args.cluster_threshold
+                )
                 gc_distance = float(to_numpy(outputs["gc_distance"]).reshape(-1)[0])
+                infer_ms = (time.perf_counter() - infer_start) * 1000.0
+                now_ts = time.time()
 
                 with self.frame_lock:
                     self.latest_overlay_waypoints = selected_waypoints
                     self.latest_gc_distance = gc_distance
+                    self.inference_durations_ms.append(infer_ms)
+                    self.inference_timestamps.append(now_ts)
+                    self.latest_inference_ms = infer_ms
+                    if len(self.inference_timestamps) >= 2:
+                        total_dt = (
+                            self.inference_timestamps[-1]
+                            - self.inference_timestamps[0]
+                        )
+                        if total_dt > 1e-6:
+                            self.latest_inference_hz = (
+                                (len(self.inference_timestamps) - 1) / total_dt
+                            )
+                    avg_infer_ms = float(np.mean(self.inference_durations_ms))
+                    actual_hz = self.latest_inference_hz
+                self.get_logger().info(
+                    f"[perf] infer={infer_ms:.1f}ms avg={avg_infer_ms:.1f}ms"
+                    + (
+                        ""
+                        if actual_hz is None
+                        else f" actual_hz={actual_hz:.2f}"
+                    )
+                )
             except Exception as e:
                 self.get_logger().error(f"Live inference failed: {e}")
                 time.sleep(0.1)
@@ -988,6 +1096,12 @@ def run_snapshot_inference(
     uc_actions = to_numpy(outputs["uc_actions"])
     gc_actions = to_numpy(outputs["gc_actions"])
     gc_distance = to_numpy(outputs["gc_distance"])
+    uc_cluster = cluster_trajectory_samples(
+        uc_actions, distance_threshold=args.cluster_threshold
+    )
+    gc_cluster = cluster_trajectory_samples(
+        gc_actions, distance_threshold=args.cluster_threshold
+    )
 
     save_outputs(
         output_dir=args.output_dir,
@@ -996,6 +1110,12 @@ def run_snapshot_inference(
         uc_actions=uc_actions,
         gc_actions=gc_actions,
         gc_distance=gc_distance,
+        selected_uc=uc_cluster["selected_trajectory"],
+        selected_gc=gc_cluster["selected_trajectory"],
+        selected_uc_index=uc_cluster["selected_index"],
+        selected_gc_index=gc_cluster["selected_index"],
+        selected_uc_cluster_size=len(uc_cluster["selected_cluster"]),
+        selected_gc_cluster_size=len(gc_cluster["selected_cluster"]),
         viz_obs=viz_obs,
         viz_goal=viz_goal,
     )

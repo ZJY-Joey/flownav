@@ -35,6 +35,74 @@ def load_data_stats() -> dict:
 ACTION_STATS = load_data_stats()
 
 
+def weighted_trajectory_distance_matrix(
+    trajectories: np.ndarray,
+    waypoint_weights: np.ndarray | None = None,
+) -> np.ndarray:
+    num_traj, horizon, _ = trajectories.shape
+    if waypoint_weights is None:
+        waypoint_weights = np.linspace(1.0, 2.0, horizon, dtype=np.float32)
+    waypoint_weights = waypoint_weights / np.sum(waypoint_weights)
+
+    diffs = trajectories[:, None, :, :] - trajectories[None, :, :, :]
+    pointwise = np.linalg.norm(diffs, axis=-1)
+    return np.sum(pointwise * waypoint_weights[None, None, :], axis=-1)
+
+
+def cluster_trajectory_samples(
+    trajectories: np.ndarray,
+    distance_threshold: float = 0.35,
+    waypoint_weights: np.ndarray | None = None,
+) -> dict:
+    if trajectories.ndim != 3 or trajectories.shape[-1] != 2:
+        raise ValueError(
+            f"Expected trajectories with shape [N, T, 2], got {trajectories.shape}"
+        )
+    num_traj = trajectories.shape[0]
+    if num_traj == 0:
+        raise ValueError("Cannot cluster zero trajectories")
+
+    distance_matrix = weighted_trajectory_distance_matrix(
+        trajectories, waypoint_weights=waypoint_weights
+    )
+    adjacency = distance_matrix <= distance_threshold
+    labels = -np.ones(num_traj, dtype=np.int64)
+    clusters = []
+    cluster_id = 0
+
+    for start_idx in range(num_traj):
+        if labels[start_idx] != -1:
+            continue
+        stack = [start_idx]
+        current_cluster = []
+        labels[start_idx] = cluster_id
+        while stack:
+            idx = stack.pop()
+            current_cluster.append(idx)
+            neighbors = np.where(adjacency[idx])[0]
+            for neighbor in neighbors:
+                if labels[neighbor] == -1:
+                    labels[neighbor] = cluster_id
+                    stack.append(int(neighbor))
+        clusters.append(sorted(current_cluster))
+        cluster_id += 1
+
+    clusters.sort(key=lambda cluster: (-len(cluster), min(cluster)))
+    selected_cluster = clusters[0]
+    cluster_dist = distance_matrix[np.ix_(selected_cluster, selected_cluster)]
+    medoid_local_idx = int(np.argmin(cluster_dist.sum(axis=1)))
+    medoid_idx = int(selected_cluster[medoid_local_idx])
+
+    return {
+        "labels": labels,
+        "clusters": clusters,
+        "selected_cluster": selected_cluster,
+        "selected_index": medoid_idx,
+        "selected_trajectory": trajectories[medoid_idx],
+        "distance_matrix": distance_matrix,
+    }
+
+
 def action_reduce(
     unreduced_loss: torch.Tensor, action_mask: torch.Tensor
 ) -> torch.Tensor:
@@ -332,19 +400,30 @@ def visualize_action_distribution(
         fig, ax = plt.subplots(1, 3)
         uc_actions = uc_actions_list[i]
         gc_actions = gc_actions_list[i]
+        cluster_info = cluster_trajectory_samples(gc_actions)
+        selected_gc = cluster_info["selected_trajectory"]
         action_label = to_numpy(batch_action_label[i])
         traj_list = np.concatenate(
             [
                 uc_actions,
                 gc_actions,
+                selected_gc[None],
                 action_label[None],
             ],
             axis=0,
         )
         traj_colors = (
-            ["red"] * len(uc_actions) + ["green"] * len(gc_actions) + ["magenta"]
+            ["red"] * len(uc_actions)
+            + ["green"] * len(gc_actions)
+            + ["blue"]
+            + ["magenta"]
         )
-        traj_alphas = [0.1] * (len(uc_actions) + len(gc_actions)) + [1.0]
+        traj_alphas = (
+            [0.1] * len(uc_actions)
+            + [0.1] * len(gc_actions)
+            + [1.0]
+            + [1.0]
+        )
         point_list = [np.array([0, 0]), to_numpy(batch_goal_pos[i])]
         point_colors = ["green", "red"]
         point_alphas = [1.0, 1.0]
@@ -354,7 +433,12 @@ def visualize_action_distribution(
             list_points=point_list,
             traj_colors=traj_colors,
             point_colors=point_colors,
-            traj_labels=None,
+            traj_labels=(
+                ["UC samples"] * len(uc_actions)
+                + ["GC samples"] * len(gc_actions)
+                + ["selected GC"]
+                + ["GT"]
+            ),
             point_labels=None,
             quiver_freq=0,
             traj_alphas=traj_alphas,
@@ -366,7 +450,9 @@ def visualize_action_distribution(
         goal_image = np.moveaxis(goal_image, 0, -1)
         ax[1].imshow(obs_image)
         ax[2].imshow(goal_image)
-        ax[0].set_title("action predictions")
+        ax[0].set_title(
+            f"action predictions (selected GC cluster size={len(cluster_info['selected_cluster'])}/{len(gc_actions)})"
+        )
         ax[1].set_title("observation")
         ax[2].set_title(
             f"goal: label={np_distance_labels[i]} gc_dist={gc_distances_avg[i]:.2f}±{gc_distances_std[i]:.2f}"

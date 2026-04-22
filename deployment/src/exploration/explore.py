@@ -27,7 +27,7 @@ from topic_names import (IMAGE_TOPIC,
                         SAMPLED_ACTIONS_TOPIC)
 
 # Custom Imports
-from flownav.training.utils import get_action
+from flownav.training.utils import get_action, cluster_trajectory_samples
 from utils import to_numpy, transform_images, load_model, remove_files_in_dir
 
 # CONSTANTS
@@ -195,9 +195,16 @@ class Exploration(Node):
                 sampled_actions_msg.data = sampled_action_message_data.tolist()
                 self.sampled_actions_pub.publish(sampled_actions_msg)
 
-                naction = naction[0] # change this based on heuristic
-
-                chosen_waypoint = naction[args.waypoint]
+                cluster_info = cluster_trajectory_samples(
+                    naction,
+                    distance_threshold=args.cluster_threshold,
+                )
+                selected_action = cluster_info["selected_trajectory"]
+                chosen_waypoint = selected_action[args.waypoint]
+                print(
+                    f"Selected cluster size: {len(cluster_info['selected_cluster'])}/{len(naction)} "
+                    f"medoid index: {cluster_info['selected_index']}"
+                )
 
                 if self.model_params["normalize"]:
                     chosen_waypoint *= (MAX_V / RATE)
@@ -268,6 +275,12 @@ if __name__ == "__main__":
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
     parser.add_argument(
+        "--cluster-threshold",
+        default=0.35,
+        type=float,
+        help="Distance threshold for trajectory clustering in action space.",
+    )
+    parser.add_argument(
         "--exp_dir",
         "-s",
         default="explore_topomap",
@@ -296,5 +309,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)
-
 

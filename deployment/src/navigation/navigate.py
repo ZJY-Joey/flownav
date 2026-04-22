@@ -26,7 +26,7 @@ from topic_names import (IMAGE_TOPIC,
                         REACHED_GOAL_TOPIC)
 
 # Custom Imports
-from flownav.training.utils import get_action
+from flownav.training.utils import get_action, cluster_trajectory_samples
 from utils import to_numpy, transform_images, load_model
 
 
@@ -219,8 +219,16 @@ class NavigationNode(Node):
                 sampled_actions_msg.data = message_data.tolist()
                 print("published sampled actions")
                 self.sampled_actions_pub.publish(sampled_actions_msg)
-                naction = naction[0] 
-                chosen_waypoint = naction[args.waypoint]
+                cluster_info = cluster_trajectory_samples(
+                    naction,
+                    distance_threshold=args.cluster_threshold,
+                )
+                selected_action = cluster_info["selected_trajectory"]
+                chosen_waypoint = selected_action[args.waypoint]
+                print(
+                    f"Selected cluster size: {len(cluster_info['selected_cluster'])}/{len(naction)} "
+                    f"medoid index: {cluster_info['selected_index']}"
+                )
             
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = chosen_waypoint.flatten().tolist()
@@ -315,6 +323,12 @@ if __name__ == "__main__":
         default=8,
         type=int,
         help="Number of actions sampled from the exploration model",
+    )
+    parser.add_argument(
+        "--cluster-threshold",
+        default=0.35,
+        type=float,
+        help="Distance threshold for trajectory clustering in action space.",
     )
     parser.add_argument(
         "--exp_dir",
