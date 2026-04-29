@@ -1,5 +1,5 @@
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import click
 import torch
@@ -16,9 +16,9 @@ from flownav.training.train import train
 def main_loop(
     train_model: bool,
     model: nn.Module,
-    optimizer: Adam,
-    lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
-    train_loader: DataLoader,
+    optimizer: Optional[Adam],
+    lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    train_loader: Optional[DataLoader],
     test_dataloaders: Dict[str, DataLoader],
     transform: transforms,
     goal_mask_prob: float,
@@ -37,15 +37,16 @@ def main_loop(
     selected_action_num_samples: int = 8,
     selected_action_cluster_threshold: float = 0.35,
 ) -> None:
-    # Set saving paths
-    latest_path = os.path.join(project_folder, "latest.pth")
-
     # Create EMA model
     ema_model = EMAModel(model=model, power=0.75)
 
     # Run the epochs
     for epoch in range(current_epoch, current_epoch + epochs):
         if train_model:
+            if optimizer is None or lr_scheduler is None or train_loader is None:
+                raise ValueError(
+                    "Training mode requires optimizer, scheduler, and train_loader."
+                )
             click.echo(
                 click.style(
                     f"> Start epoch {epoch}/{current_epoch + epochs - 1}",
@@ -71,23 +72,22 @@ def main_loop(
             )
             lr_scheduler.step()
 
-        # Save the model, EMA model, optimizer, and scheduler
-        numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
-        torch.save(ema_model.averaged_model.state_dict(), numbered_path)
-        numbered_path = os.path.join(project_folder, "ema_latest.pth")
-        torch.save(ema_model.averaged_model.state_dict(), latest_path)
+            # Save the model, EMA model, optimizer, and scheduler only after training.
+            latest_path = os.path.join(project_folder, "latest.pth")
+            numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
+            torch.save(ema_model.averaged_model.state_dict(), numbered_path)
+            latest_ema_path = os.path.join(project_folder, "ema_latest.pth")
+            torch.save(ema_model.averaged_model.state_dict(), latest_ema_path)
 
-        numbered_path = os.path.join(project_folder, f"{epoch}.pth")
-        torch.save(model.state_dict(), numbered_path)
-        torch.save(model.state_dict(), latest_path)
+            numbered_path = os.path.join(project_folder, f"{epoch}.pth")
+            torch.save(model.state_dict(), numbered_path)
+            torch.save(model.state_dict(), latest_path)
 
-        numbered_path = os.path.join(project_folder, f"optimizer_{epoch}.pth")
-        latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
-        torch.save(optimizer.state_dict(), latest_optimizer_path)
+            latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
+            torch.save(optimizer.state_dict(), latest_optimizer_path)
 
-        numbered_path = os.path.join(project_folder, f"scheduler_{epoch}.pth")
-        latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
-        torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
+            latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
+            torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
 
         # In case of evaluation
         if (epoch + 1) % eval_freq == 0:
@@ -118,7 +118,7 @@ def main_loop(
                 )
 
         # Log the current learning rate
-        if use_wandb:
+        if use_wandb and train_model and optimizer is not None:
             wandb.log(
                 {
                     "lr": optimizer.param_groups[0]["lr"],
@@ -126,7 +126,7 @@ def main_loop(
                 commit=False,
             )
 
-        if lr_scheduler is not None:
+        if train_model and lr_scheduler is not None:
             lr_scheduler.step()
 
     # Flush the last set of eval logs

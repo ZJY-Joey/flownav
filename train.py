@@ -21,6 +21,10 @@ from warmup_scheduler import GradualWarmupScheduler
 
 
 def main(config: dict) -> None:
+    train_model = bool(config["train"])
+    if not train_model and "load_run" not in config:
+        raise ValueError("Eval-only mode requires `load_run` to point to a checkpoint.")
+
     # Set up the device
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -61,6 +65,8 @@ def main(config: dict) -> None:
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
         for data_split_type in ["train", "test"]:
+            if data_split_type == "train" and not train_model:
+                continue
             if data_split_type in data_config:
                 dataset = ViNT_Dataset(
                     data_folder=data_config["data_folder"],
@@ -89,24 +95,34 @@ def main(config: dict) -> None:
                     if dataset_type not in test_dataloaders:
                         test_dataloaders[dataset_type] = {}
                     test_dataloaders[dataset_type] = dataset
-    train_dataset = ConcatDataset(train_dataset)
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=False,
-    )
-    click.echo(
-        click.style(
-            f">> Loaded {len(train_dataset)} training samples",
-            fg="cyan",
-            bold=True,
+    train_loader = None
+    if train_model:
+        if len(train_dataset) == 0:
+            raise ValueError("Training mode requires at least one train dataset.")
+        train_dataset = ConcatDataset(train_dataset)
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=False,
         )
-    )
+        click.echo(
+            click.style(
+                f">> Loaded {len(train_dataset)} training samples",
+                fg="cyan",
+                bold=True,
+            )
+        )
+    else:
+        click.echo(
+            click.style(">> Eval-only mode: skipping train dataset", fg="yellow")
+        )
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
+    if len(test_dataloaders) == 0:
+        raise ValueError("Evaluation requires at least one test dataset.")
     for dataset_type, dataset in test_dataloaders.items():
         test_dataloaders[dataset_type] = DataLoader(
             dataset=dataset,
@@ -145,18 +161,21 @@ def main(config: dict) -> None:
         noise_pred_net=noise_pred_net,
         dist_pred_net=dist_pred_network,
     )
-    lr = float(config["lr"])
-    config["optimizer"] = config["optimizer"].lower()
-    optimizer = AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer=optimizer, T_max=config["epochs"]
-    )
-    scheduler = GradualWarmupScheduler(
-        optimizer=optimizer,
-        multiplier=1,
-        total_epoch=config["warmup_epochs"],
-        after_scheduler=scheduler,
-    )
+    optimizer = None
+    scheduler = None
+    if train_model:
+        lr = float(config["lr"])
+        config["optimizer"] = config["optimizer"].lower()
+        optimizer = AdamW(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer, T_max=config["epochs"]
+        )
+        scheduler = GradualWarmupScheduler(
+            optimizer=optimizer,
+            multiplier=1,
+            total_epoch=config["warmup_epochs"],
+            after_scheduler=scheduler,
+        )
 
     # Load pre-trained model if specified
     current_epoch = 0
@@ -179,37 +198,51 @@ def main(config: dict) -> None:
                     fg="red",
                 )
             )
-        latest_checkpoint = torch.load(latest_path)
+        latest_checkpoint = torch.load(latest_path, map_location=device)
         if "model" in latest_checkpoint:
             model.load_state_dict(latest_checkpoint["model"], strict=True)
         else:
             model.load_state_dict(latest_checkpoint, strict=True)
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
-        if "optimizer" in latest_checkpoint:
-            optimizer.load_state_dict(latest_checkpoint["optimizer"].state_dict())
+        if optimizer is not None and "optimizer" in latest_checkpoint:
+            optimizer_state = latest_checkpoint["optimizer"]
+            if hasattr(optimizer_state, "state_dict"):
+                optimizer_state = optimizer_state.state_dict()
+            optimizer.load_state_dict(optimizer_state)
         if scheduler is not None and "scheduler" in latest_checkpoint:
-            scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
+            scheduler_state = latest_checkpoint["scheduler"]
+            if hasattr(scheduler_state, "state_dict"):
+                scheduler_state = scheduler_state.state_dict()
+            scheduler.load_state_dict(scheduler_state)
 
-    # Load Depth-Anything pre-trained weights
-    checkpoint = torch.load(
-        config["depth"]["weights_path"],
-        map_location=device,
-    )
-    saved_state_dict = (
-        checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    )
-    updated_state_dict = {
-        k.replace("pretrained.", ""): v
-        for k, v in saved_state_dict.items()
-        if "pretrained" in k
-    }
-    new_state_dict = {
-        k: v
-        for k, v in updated_state_dict.items()
-        if k in model.vision_encoder.depth_encoder.state_dict()
-    }
-    model.vision_encoder.depth_encoder.load_state_dict(new_state_dict, strict=False)
+    if train_model:
+        # Load Depth-Anything pre-trained weights for training. In eval-only mode,
+        # keep the checkpoint weights untouched.
+        checkpoint = torch.load(
+            config["depth"]["weights_path"],
+            map_location=device,
+        )
+        saved_state_dict = (
+            checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+        )
+        updated_state_dict = {
+            k.replace("pretrained.", ""): v
+            for k, v in saved_state_dict.items()
+            if "pretrained" in k
+        }
+        new_state_dict = {
+            k: v
+            for k, v in updated_state_dict.items()
+            if k in model.vision_encoder.depth_encoder.state_dict()
+        }
+        model.vision_encoder.depth_encoder.load_state_dict(new_state_dict, strict=False)
+    else:
+        click.echo(
+            click.style(
+                ">> Eval-only mode: preserving checkpoint weights", fg="yellow"
+            )
+        )
 
     # Multi-GPU setup
     if len(config["gpu_ids"]) > 1:
@@ -218,7 +251,7 @@ def main(config: dict) -> None:
 
     # Run the training loop
     main_loop(
-        train_model=config["train"],
+        train_model=train_model,
         model=model,
         optimizer=optimizer,
         lr_scheduler=scheduler,
@@ -243,7 +276,11 @@ def main(config: dict) -> None:
     )
     click.echo(
         click.style(
-            f">> Training completed. Model saved to {config['project_folder']}",
+            (
+                f">> Training completed. Model saved to {config['project_folder']}"
+                if train_model
+                else f">> Evaluation completed. Outputs saved to {config['project_folder']}"
+            ),
             fg="green",
             bold=True,
         )
