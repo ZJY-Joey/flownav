@@ -170,8 +170,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--live-mode",
         choices=["gc_cluster", "uc_cluster", "gc_mean", "gc_first", "uc_mean", "uc_first"],
-        default="gc_cluster",
-        help="Which predicted trajectory to project in live mode.",
+        default="gc_first",
+        help=(
+            "Which predicted trajectory to project in live mode. Defaults to "
+            "the original FlowNav first-sample trajectory selection."
+        ),
+    )
+    parser.add_argument(
+        "--use-cluster-selection",
+        action="store_true",
+        help=(
+            "Enable clustered trajectory selection. If omitted, selects the "
+            "first sampled trajectory like the original FlowNav deployment code."
+        ),
     )
     parser.add_argument(
         "--cluster-threshold",
@@ -183,7 +194,15 @@ def parse_args() -> argparse.Namespace:
         "--consistency-threshold",
         type=float,
         default=0.5,
-        help="Maximum trajectory distance to keep selecting the same mode across frames.",
+        help=(
+            "Maximum trajectory distance to keep selecting the same mode across "
+            "frames. Used only with clustered selection."
+        ),
+    )
+    parser.add_argument(
+        "--use-waypoint-ema",
+        action="store_true",
+        help="Enable EMA smoothing for selected live waypoints.",
     )
     parser.add_argument(
         "--waypoint-ema-decay",
@@ -767,6 +786,54 @@ def choose_live_waypoints(
     return waypoints
 
 
+def live_mode_action_key(mode: str) -> str:
+    if mode.startswith("gc_"):
+        return "gc_actions"
+    if mode.startswith("uc_"):
+        return "uc_actions"
+    raise ValueError(f"Unsupported live mode: {mode}")
+
+
+def use_cluster_selection(args: argparse.Namespace) -> bool:
+    return args.use_cluster_selection or args.live_mode in {"gc_cluster", "uc_cluster"}
+
+
+def select_first_trajectory_sample(trajectories: np.ndarray) -> dict:
+    if trajectories.ndim != 3 or trajectories.shape[-1] != 2:
+        raise ValueError(
+            f"Expected trajectories with shape [N, T, 2], got {trajectories.shape}"
+        )
+    if trajectories.shape[0] == 0:
+        raise ValueError("Cannot select from zero trajectories")
+    return {
+        "labels": np.zeros(trajectories.shape[0], dtype=np.int64),
+        "clusters": [[0]],
+        "selected_cluster": [0],
+        "selected_index": 0,
+        "selected_trajectory": trajectories[0],
+        "distance_matrix": None,
+        "selection_reason": "first_sample",
+        "previous_distance": None,
+    }
+
+
+def select_trajectory_sample(
+    trajectories: np.ndarray,
+    use_cluster: bool,
+    cluster_threshold: float,
+    previous_trajectory: Optional[np.ndarray] = None,
+    consistency_threshold: Optional[float] = None,
+) -> dict:
+    if use_cluster:
+        return select_consistent_clustered_trajectory(
+            trajectories,
+            previous_trajectory=previous_trajectory,
+            distance_threshold=cluster_threshold,
+            consistency_threshold=consistency_threshold,
+        )
+    return select_first_trajectory_sample(trajectories)
+
+
 class LiveOverlayWriter:
     def __init__(self, output_path: str, fps: float):
         self.output_path = output_path
@@ -921,7 +988,12 @@ class FlowNavLiveNode(Node):
         overlay_font_thickness = 2
         cv2.putText(
             overlay_bgr,
-            f"mode={self.args.live_mode} frames={len(self.obs_queue)}/{self.expected_obs}",
+            (
+                f"mode={self.args.live_mode} "
+                f"cluster={'on' if use_cluster_selection(self.args) else 'off'} "
+                f"ema={'on' if self.args.use_waypoint_ema else 'off'} "
+                f"frames={len(self.obs_queue)}/{self.expected_obs}"
+            ),
             (20, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
             overlay_font_scale,
@@ -1035,38 +1107,43 @@ class FlowNavLiveNode(Node):
                 gc_actions = to_numpy(outputs["gc_actions"])
                 uc_actions = to_numpy(outputs["uc_actions"])
                 selection_reason = None
-                if self.args.live_mode == "gc_cluster":
-                    cluster_info = select_consistent_clustered_trajectory(
-                        gc_actions,
-                        previous_trajectory=self.prev_selected_gc_trajectory,
-                        distance_threshold=self.args.cluster_threshold,
+                if use_cluster_selection(self.args):
+                    action_key = live_mode_action_key(self.args.live_mode)
+                    previous_trajectory = (
+                        self.prev_selected_gc_trajectory
+                        if action_key == "gc_actions"
+                        else self.prev_selected_uc_trajectory
+                    )
+                    cluster_info = select_trajectory_sample(
+                        gc_actions if action_key == "gc_actions" else uc_actions,
+                        use_cluster=True,
+                        cluster_threshold=self.args.cluster_threshold,
+                        previous_trajectory=previous_trajectory,
                         consistency_threshold=self.args.consistency_threshold,
                     )
                     selected_waypoints = cluster_info["selected_trajectory"]
-                    self.prev_selected_gc_trajectory = selected_waypoints.copy()
-                    selection_reason = cluster_info["selection_reason"]
-                elif self.args.live_mode == "uc_cluster":
-                    cluster_info = select_consistent_clustered_trajectory(
-                        uc_actions,
-                        previous_trajectory=self.prev_selected_uc_trajectory,
-                        distance_threshold=self.args.cluster_threshold,
-                        consistency_threshold=self.args.consistency_threshold,
-                    )
-                    selected_waypoints = cluster_info["selected_trajectory"]
-                    self.prev_selected_uc_trajectory = selected_waypoints.copy()
+                    if action_key == "gc_actions":
+                        self.prev_selected_gc_trajectory = selected_waypoints.copy()
+                    else:
+                        self.prev_selected_uc_trajectory = selected_waypoints.copy()
                     selection_reason = cluster_info["selection_reason"]
                 else:
                     selected_waypoints = choose_live_waypoints(
                         outputs, self.args.live_mode, self.args.cluster_threshold
                     )
+                    self.prev_selected_gc_trajectory = None
+                    self.prev_selected_uc_trajectory = None
                     selection_reason = "direct_selection"
 
-                selected_waypoints = ema_smooth_waypoint(
-                    selected_waypoints,
-                    previous_waypoint=self.prev_waypoint_ema,
-                    ema_decay=self.args.waypoint_ema_decay,
-                )
-                self.prev_waypoint_ema = selected_waypoints.copy()
+                if self.args.use_waypoint_ema:
+                    selected_waypoints = ema_smooth_waypoint(
+                        selected_waypoints,
+                        previous_waypoint=self.prev_waypoint_ema,
+                        ema_decay=self.args.waypoint_ema_decay,
+                    )
+                    self.prev_waypoint_ema = selected_waypoints.copy()
+                else:
+                    self.prev_waypoint_ema = None
                 gc_distance = float(to_numpy(outputs["gc_distance"]).reshape(-1)[0])
                 infer_ms = (time.perf_counter() - infer_start) * 1000.0
                 infer_fps = 1000.0 / max(infer_ms, 1e-6)
@@ -1186,11 +1263,20 @@ def run_snapshot_inference(
     uc_actions = to_numpy(outputs["uc_actions"])
     gc_actions = to_numpy(outputs["gc_actions"])
     gc_distance = to_numpy(outputs["gc_distance"])
-    uc_cluster = cluster_trajectory_samples(
-        uc_actions, distance_threshold=args.cluster_threshold
+    source_info = {
+        **source_info,
+        "use_cluster_selection": args.use_cluster_selection,
+        "use_waypoint_ema": False,
+    }
+    uc_selection = select_trajectory_sample(
+        uc_actions,
+        use_cluster=args.use_cluster_selection,
+        cluster_threshold=args.cluster_threshold,
     )
-    gc_cluster = cluster_trajectory_samples(
-        gc_actions, distance_threshold=args.cluster_threshold
+    gc_selection = select_trajectory_sample(
+        gc_actions,
+        use_cluster=args.use_cluster_selection,
+        cluster_threshold=args.cluster_threshold,
     )
 
     save_outputs(
@@ -1200,12 +1286,12 @@ def run_snapshot_inference(
         uc_actions=uc_actions,
         gc_actions=gc_actions,
         gc_distance=gc_distance,
-        selected_uc=uc_cluster["selected_trajectory"],
-        selected_gc=gc_cluster["selected_trajectory"],
-        selected_uc_index=uc_cluster["selected_index"],
-        selected_gc_index=gc_cluster["selected_index"],
-        selected_uc_cluster_size=len(uc_cluster["selected_cluster"]),
-        selected_gc_cluster_size=len(gc_cluster["selected_cluster"]),
+        selected_uc=uc_selection["selected_trajectory"],
+        selected_gc=gc_selection["selected_trajectory"],
+        selected_uc_index=uc_selection["selected_index"],
+        selected_gc_index=gc_selection["selected_index"],
+        selected_uc_cluster_size=len(uc_selection["selected_cluster"]),
+        selected_gc_cluster_size=len(gc_selection["selected_cluster"]),
         viz_obs=viz_obs,
         viz_goal=viz_goal,
     )
@@ -1213,6 +1299,10 @@ def run_snapshot_inference(
     print(f"Saved outputs to: {args.output_dir}")
     print(f"UC trajectories shape: {uc_actions.shape}")
     print(f"GC trajectories shape: {gc_actions.shape}")
+    print(
+        "Trajectory selection: "
+        + ("clustered" if args.use_cluster_selection else "first_sample")
+    )
     print(f"GC distance predictions: {gc_distance.reshape(-1).tolist()}")
 
 

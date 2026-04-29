@@ -201,26 +201,35 @@ class Exploration(Node):
                 sampled_actions_msg.data = sampled_action_message_data.tolist()
                 self.sampled_actions_pub.publish(sampled_actions_msg)
 
-                cluster_info = select_consistent_clustered_trajectory(
-                    naction,
-                    previous_trajectory=self.prev_selected_action,
-                    distance_threshold=args.cluster_threshold,
-                    consistency_threshold=args.consistency_threshold,
-                )
-                selected_action = cluster_info["selected_trajectory"]
+                if args.use_cluster_selection:
+                    cluster_info = select_consistent_clustered_trajectory(
+                        naction,
+                        previous_trajectory=self.prev_selected_action,
+                        distance_threshold=args.cluster_threshold,
+                        consistency_threshold=args.consistency_threshold,
+                    )
+                    selected_action = cluster_info["selected_trajectory"]
+                    self.prev_selected_action = selected_action.copy()
+                    print(
+                        f"Selected cluster size: {len(cluster_info['selected_cluster'])}/{len(naction)} "
+                        f"medoid index: {cluster_info['selected_index']} "
+                        f"reason: {cluster_info['selection_reason']}"
+                    )
+                else:
+                    selected_action = naction[0]
+                    self.prev_selected_action = None
+                    print("Selected first sampled trajectory")
+
                 chosen_waypoint = selected_action[args.waypoint]
-                self.prev_selected_action = selected_action.copy()
-                chosen_waypoint = ema_smooth_waypoint(
-                    chosen_waypoint,
-                    previous_waypoint=self.prev_waypoint_ema,
-                    ema_decay=args.waypoint_ema_decay,
-                )
-                self.prev_waypoint_ema = chosen_waypoint.copy()
-                print(
-                    f"Selected cluster size: {len(cluster_info['selected_cluster'])}/{len(naction)} "
-                    f"medoid index: {cluster_info['selected_index']} "
-                    f"reason: {cluster_info['selection_reason']}"
-                )
+                if args.use_waypoint_ema:
+                    chosen_waypoint = ema_smooth_waypoint(
+                        chosen_waypoint,
+                        previous_waypoint=self.prev_waypoint_ema,
+                        ema_decay=args.waypoint_ema_decay,
+                    )
+                    self.prev_waypoint_ema = chosen_waypoint.copy()
+                else:
+                    self.prev_waypoint_ema = None
 
                 if self.model_params["normalize"]:
                     chosen_waypoint *= (MAX_V / RATE)
@@ -291,6 +300,14 @@ if __name__ == "__main__":
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
     parser.add_argument(
+        "--use-cluster-selection",
+        action="store_true",
+        help=(
+            "Enable clustered trajectory selection. If omitted, selects the "
+            "first sampled trajectory like the original FlowNav deployment code."
+        ),
+    )
+    parser.add_argument(
         "--cluster-threshold",
         default=0.35,
         type=float,
@@ -300,7 +317,15 @@ if __name__ == "__main__":
         "--consistency-threshold",
         default=0.5,
         type=float,
-        help="Maximum trajectory distance to keep selecting the same mode across frames.",
+        help=(
+            "Maximum trajectory distance to keep selecting the same mode across "
+            "frames. Used only with clustered selection."
+        ),
+    )
+    parser.add_argument(
+        "--use-waypoint-ema",
+        action="store_true",
+        help="Enable EMA smoothing for the final published waypoint.",
     )
     parser.add_argument(
         "--waypoint-ema-decay",
