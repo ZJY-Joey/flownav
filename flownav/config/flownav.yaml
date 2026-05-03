@@ -82,14 +82,14 @@ datasets:
     goals_per_obs: 1 # how many goals are sampled per observation
     negative_mining: True # negative mining from the ViNG paper (Shah et al.)
     waypoint_spacing: 1
-  # go_stanford:
-  #   data_folder: /home/<username>/nomad_dataset/go_stanford_cropped # datasets/stanford_go_new
-  #   train: /home/<username>/data_splits/go_stanford/train/
-  #   test: /home/<username>/data_splits/go_stanford/test/
-  #   end_slack: 0
-  #   goals_per_obs: 2 # increase dataset size
-  #   negative_mining: True
-  #   waypoint_spacing: 1
+  go_stanford:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford # datasets/stanford_go_new
+    train: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford/data_splits/go_stanford/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford/data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2 # increase dataset size
+    negative_mining: True
+    waypoint_spacing: 1
   # cory_hall:
   #   data_folder: /home/<username>/nomad_dataset/cory_hall/
   #   train: /home/<username>/data_splits/cory_hall/train/
@@ -106,14 +106,14 @@ datasets:
   #   goals_per_obs: 1
   #   negative_mining: True
   #   waypoint_spacing: 1
-  # sacson:
-  #   data_folder: /home/<username>/nomad_dataset/sacson/
-  #   train: /home/<username>/data_splits/sacson/train/
-  #   test: /home/<username>/data_splits/sacson/test/
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1
-  #   negative_mining: True
-  #   waypoint_spacing: 1
+  sacson:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson/
+    train: /media/zjy/Elements SE/11111/UED_FLOW/sacson/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/sacson/test/
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1
+    negative_mining: True
+    waypoint_spacing: 1
 
 # logging stuff
 ## =0 turns off
