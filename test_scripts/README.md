@@ -14,27 +14,59 @@ resolved from `logs/<load_run>/latest.pth` in `flownav/config/flownav.yaml`.
 
 Chinese documentation: [README_CN.md](README_CN.md).
 
+## Maintenance Status
+
+Current active scope:
+
+- `goal_swap_visualization.py`
+- `goal_mask_sensitivity.py`
+- `generate_summary_figures.py`
+- `common.py`, only for utilities used by the active scripts
+
+The other test scripts are kept in the repository for historical reference, but
+they are temporarily archived and no longer actively synchronized with the
+current goal-swap evaluation workflow:
+
+- `goal_shuffle_quantitative.py`
+- `goal_inconsistent_rate.py`
+- `goal_separation_ratio.py`
+
+Use these archived scripts only if you have checked their assumptions and
+outputs manually. New changes should target the active goal-swap and
+goal-mask-sensitivity pipelines unless there is an explicit reason to revive one
+of the archived tests.
+
 ## Output Layout
 
-By default, outputs are written to `test_logs/<dataset>/<script_name>/`.
+By default, baseline outputs are written to
+`test_logs/flownav_baseline/<dataset>/<script_name>/`.
+
+When `goal_swap_visualization.py` is run with
+`--trajectory-selection cluster`, outputs are written to
+`test_logs/flownav_cluster/<dataset>/<script_name>/`.
 
 Typical layout:
 
 ```text
 test_logs/
-  recon/
-    goal_shuffle_quantitative/
-    goal_swap_visualization/
-      angle10-mmd0p5-emd0p2/
-        all_samples/
-          heading_filter/
-          no_heading_filter/
-        anomaly_samples/
-          heading_filter/
-          no_heading_filter/
-    goal_inconsistent_rate/
-    goal_mask_sensitivity/
-    goal_separation_ratio/
+  flownav_baseline/
+    recon/
+      goal_swap_visualization/
+        angle10-mmd0p5-emd0p2/
+          all_samples/
+            heading_filter/
+            no_heading_filter/
+          anomaly_samples/
+            heading_filter/
+            no_heading_filter/
+    summary_figure/
+  flownav_cluster/
+    recon/
+      goal_swap_visualization/
+        angle10-mmd0p5-emd0p2/
+          all_samples/
+          anomaly_samples/
+    summary_figure/
 ```
 
 For `goal_swap_visualization.py`, the threshold folder name encodes the run
@@ -83,9 +115,12 @@ Low MMD/EMD values are suspicious when the selected goals are clearly different:
 they indicate that the model may generate nearly the same trajectory
 distribution regardless of the goal image.
 
-## 1. Goal Shuffle Quantitative
+## Archived: Goal Shuffle Quantitative
 
 File: `goal_shuffle_quantitative.py`
+
+Status: temporarily archived. This script is not part of the currently
+maintained evaluation workflow.
 
 ### What It Does
 
@@ -129,7 +164,7 @@ python test_scripts/goal_shuffle_quantitative.py \
   --max-alternative-angle-diff-deg 90 \
   --max-direction-angle-deg 90 \
   --visualization-samples 16 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### What To Inspect
@@ -139,7 +174,7 @@ python test_scripts/goal_shuffle_quantitative.py \
 - If alternative goals are too extreme, lower `--max-alternative-angle-diff-deg`.
 - If too few matches are found, increase scan batches or relax angle limits.
 
-## 2. Goal Swap Visualization
+## Active: Goal Swap Visualization
 
 File: `goal_swap_visualization.py`
 
@@ -164,10 +199,19 @@ The script automatically runs two settings:
   left/forward/right class.
 - `no_heading_filter`: only `goal_pos` direction is used for class selection.
 
+Trajectory selection modes:
+
+- `baseline`: keeps the sampled FlowNav trajectories and preserves the previous
+  goal-swap behavior.
+- `cluster`: samples multiple trajectories per goal, clusters them with the
+  shared FlowNav weighted trajectory distance, and uses the medoid of the
+  largest cluster for metric/log generation. The selected trajectory is repeated
+  internally so distribution metrics keep the same shape as the baseline path.
+
 ### Output Structure
 
 ```text
-test_logs/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
+test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
   all_samples/
     heading_filter/
       goal_swap_global_endpoints_*.png
@@ -265,6 +309,25 @@ python test_scripts/goal_swap_visualization.py \
   --output-dir test_logs
 ```
 
+Run the clustered trajectory-selection variant:
+
+```bash
+python test_scripts/goal_swap_visualization.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --batch-size 64 \
+  --scan-batches 200 \
+  --num-samples 8 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
+  --anomaly-mmd-threshold 0.5 \
+  --anomaly-emd-threshold 0.2 \
+  --trajectory-selection cluster \
+  --cluster-threshold 0.35 \
+  --output-dir test_logs
+```
+
 ### What To Inspect
 
 - If goal-position distributions are well separated but endpoint distributions
@@ -280,9 +343,12 @@ python test_scripts/goal_swap_visualization.py \
 - If global plots are too dense, lower `--global-endpoint-max-points-per-class`.
   This only affects plotted points; metrics still use all points.
 
-## 3. Goal-Inconsistent Rate
+## Archived: Goal-Inconsistent Rate
 
 File: `goal_inconsistent_rate.py`
+
+Status: temporarily archived. This script is not part of the currently
+maintained evaluation workflow.
 
 ### What It Does
 
@@ -312,7 +378,7 @@ python test_scripts/goal_inconsistent_rate.py \
   --max-batches 20 \
   --num-samples 8 \
   --angle-threshold-deg 45 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### What To Inspect
@@ -324,23 +390,32 @@ python test_scripts/goal_inconsistent_rate.py \
 - Output filenames include the angle threshold, so different GIR thresholds can
   be compared safely.
 
-## 4. Goal Mask Sensitivity
+## Active: Goal Mask Sensitivity
 
-File: `goal_mask_sensitivity.py`
+Files:
+
+- `goal_mask_sensitivity.py`
 
 ### What It Does
 
-This test compares trajectories sampled with the original goal image against
-trajectories sampled with the goal masked. It checks whether removing goal
-information changes the output distribution.
+This test compares no-heading-filter left/forward/right goal-conditioned
+trajectories against trajectories sampled with the goal masked.
+
+"With goal" means the same-scene matched goals used by goal swap: left,
+forward, and right future goal images are selected from the same trajectory and
+same current time, with `filter_goal_heading=False`. "Masked" means the same
+observation and goal image are passed through the model's goal-mask path, so the
+trajectory is generated without goal conditioning.
 
 ### Key Metrics
 
-- Endpoint mean distance between goal-conditioned and goal-masked outputs.
-- Endpoint Chamfer distance between endpoint clouds.
-- Matched-sample ADE/FDE between goal-conditioned and masked samples.
+- `endpoint_mean_l2`: distance between goal-conditioned and masked endpoint means.
+- `endpoint_rbf_mmd`: RBF-MMD between goal-conditioned and masked endpoints.
+- `endpoint_sliced_wasserstein`: sliced Wasserstein distance, used as an EMD approximation.
+- `matched_sample_ade` / `matched_sample_fde`: paired trajectory differences between goal-conditioned and masked samples.
+- Direction-pair MMD/EMD for the with-goal endpoints and for the masked endpoints.
 
-### Run
+### Quantitative Run
 
 ```bash
 python test_scripts/goal_mask_sensitivity.py \
@@ -348,21 +423,70 @@ python test_scripts/goal_mask_sensitivity.py \
   --dataset recon \
   --split test \
   --batch-size 64 \
-  --max-batches 20 \
+  --scan-batches 200 \
   --num-samples 16 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
   --output-dir test_logs
 ```
 
+Run the clustered trajectory-selection variant:
+
+```bash
+python test_scripts/goal_mask_sensitivity.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --batch-size 64 \
+  --scan-batches 200 \
+  --num-samples 16 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
+  --trajectory-selection cluster \
+  --cluster-threshold 0.35 \
+  --output-dir test_logs
+```
+
+Outputs:
+
+```text
+test_logs/flownav_baseline/recon/goal_mask_sensitivity/angle10-no_heading_filter/
+  goal_mask_sensitivity_summary_*.json
+  goal_mask_sensitivity_items_*.csv
+  goal_mask_sensitivity_endpoints_*.npz
+```
+
+### Visualization Run
+
+`goal_mask_sensitivity.py` generates visualization figures during the same run
+that produces the JSON/CSV/NPZ outputs. Figures are saved in the same
+`goal_mask_sensitivity/<run_tag>/` folder as the metrics.
+
+Main visualization outputs:
+
+- `goal_mask_endpoint_shift_by_direction_*.png`
+  - Three panels: left, forward, right.
+  - Each panel overlays goal-conditioned endpoints and masked-goal endpoints.
+  - Each panel annotates goal-vs-masked MMD, EMD approximation, and endpoint mean shift.
+
+- `goal_mask_direction_distribution_comparison_*.png`
+  - Left panel: with-goal endpoint distributions for left/forward/right goals.
+  - Middle panel: masked-goal endpoint distributions grouped by the requested goal class.
+  - Right panel: matched goal-position distributions.
+  - The first two panels annotate direction-pair MMD and EMD approximation.
+
 ### What To Inspect
 
-- If masked and unmasked endpoint distributions are almost identical, the model
-  may not rely strongly on the goal image.
-- If masked outputs degrade substantially, goal conditioning is likely being
-  used.
+- If with-goal left/forward/right endpoints separate but masked endpoints collapse, the model is using the goal.
+- If with-goal and masked endpoints are nearly identical, goal conditioning is weak.
+- If masked endpoints still separate by left/forward/right, check whether the observation alone already determines the route or whether matched goals are biased by trajectory position.
 
-## 5. Goal Separation Ratio
+## Archived: Goal Separation Ratio
 
 File: `goal_separation_ratio.py`
+
+Status: temporarily archived. This script is not part of the currently
+maintained evaluation workflow.
 
 ### What It Does
 
@@ -399,7 +523,7 @@ python test_scripts/goal_separation_ratio.py \
   --num-samples 16 \
   --angle-threshold-deg 25 \
   --max-direction-angle-deg 90 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### What To Inspect
@@ -445,15 +569,29 @@ Control left/forward/right matching strictness:
 
 ## Summary Figure Generation
 
+## Summary Figure Generation
+
 File: `generate_summary_figures.py`
 
 This script does not run the model. It reads existing `test_logs` outputs and
-creates paper-style summary figures under `test_logs/summary_figure/`.
+creates paper-style summary figures under
+`test_logs/<variant>/summary_figure/`.
+
+The script is tolerant of incomplete experiments. If one dataset, angle, stage,
+or setting is missing, it still writes the figures that can be produced and
+marks missing image panels as `missing`. It also writes:
+
+- `missing_summary_inputs.json`
+- `missing_summary_inputs.md`
+
+These files list which swap or mask comparison inputs were unavailable.
 
 Run:
 
 ```bash
-python3 test_scripts/generate_summary_figures.py --log-root test_logs
+python3 test_scripts/generate_summary_figures.py \
+  --log-root test_logs \
+  --variant flownav_baseline
 ```
 
 Outputs:
@@ -509,6 +647,14 @@ Outputs:
   - This is the fairest plot for judging whether heading filtering improves
     metrics without changing the evaluated sample set.
 
+- `fig6_goal_mask_direction_distribution_comparison.png`
+  - Cross-dataset collage of each dataset's
+    `goal_mask_direction_distribution_comparison_*.png`.
+
+- `fig6_goal_mask_mmd_emd_delta.png`
+  - Cross-dataset comparison of with-goal minus masked-goal direction-pair MMD/EMD deltas.
+  - Bar annotations include the delta and the raw with-goal / masked-goal values.
+
 - `table1_summary.csv` and `table1_summary.md`
   - Multi-dataset summary table with matched counts, MMD, EMD, anomaly counts,
     deltas, and heading-filter retention.
@@ -516,15 +662,21 @@ Outputs:
 - `table2_paired_improvement.csv` and `table2_paired_improvement.md`
   - Numeric table backing `fig5_paired_improvement.png`.
 
+- `missing_summary_inputs.json` and `missing_summary_inputs.md`
+  - Missing dataset / angle / setting records that prevented a full comparison.
+
 Useful options:
 
 ```bash
 python3 test_scripts/generate_summary_figures.py \
   --log-root test_logs \
+  --variant flownav_cluster \
   --hard-cases-per-dataset 5 \
   --hard-case-min-index-gap 500
 ```
 
+- `--variant` chooses which log namespace to summarize:
+  `flownav_baseline` or `flownav_cluster`.
 - `--hard-cases-per-dataset` controls how many hard cases are shown per dataset.
 - `--hard-case-min-index-gap` controls how far apart selected cases should be
   in dataset index before the script relaxes the gap.

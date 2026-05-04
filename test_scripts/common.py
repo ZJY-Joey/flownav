@@ -28,7 +28,7 @@ from flownav.visualizing.plot import plot_trajs_and_points
 
 
 DEFAULT_CONFIG = REPO_ROOT / "flownav" / "config" / "flownav.yaml"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "test_logs"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "test_logs" / "flownav_baseline"
 
 
 def log(message: str) -> None:
@@ -646,6 +646,7 @@ def plot_directional_goal_samples(
     num_samples: int,
     output_path: Path,
     title: str,
+    precomputed_trajectories: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     ordered_names = [
         name
@@ -671,18 +672,21 @@ def plot_directional_goal_samples(
     for col_idx, name in enumerate(ordered_names):
         log(f"Rendering directional visualization for {name} goal...")
         candidate = directional_set["candidates"][name]
-        outputs = run_model(
-            model,
-            directional_set["base_obs"],
-            candidate["goal"],
-            config["len_traj_pred"],
-            num_samples,
-            device,
-        )
-        gc_samples = outputs["gc_actions"].reshape(
-            num_samples, config["len_traj_pred"], 2
-        )
-        gc_np = gc_samples.detach().cpu().numpy()
+        if precomputed_trajectories is None:
+            outputs = run_model(
+                model,
+                directional_set["base_obs"],
+                candidate["goal"],
+                config["len_traj_pred"],
+                num_samples,
+                device,
+            )
+            gc_samples = outputs["gc_actions"].reshape(
+                num_samples, config["len_traj_pred"], 2
+            )
+            gc_np = gc_samples.detach().cpu().numpy()
+        else:
+            gc_np = np.asarray(precomputed_trajectories[name], dtype=np.float32)
         target = candidate["target_action"].numpy()
 
         image_pair = np.concatenate(
@@ -775,7 +779,7 @@ def plot_directional_goal_samples(
         selected_angle = candidate.get("target_angle_deg")
         axes[1, col_idx].set_title(
             f"column {col_idx + 1}: {name}\n"
-            f"{num_samples} sampled trajectories"
+            f"{len(gc_np)} sampled trajectories"
         )
 
         point_dist = np.linalg.norm(gc_np - target[None], axis=-1)

@@ -10,27 +10,52 @@
 
 英文版文档见 [README.md](README.md)。
 
+## 当前维护状态
+
+当前主动维护范围：
+
+- `goal_swap_visualization.py`
+- `goal_mask_sensitivity.py`
+- `generate_summary_figures.py`
+- `common.py` 中被上述脚本使用的公共工具
+
+其他测试脚本暂时保留在仓库中作为历史参考，但已经不再作为当前主要实验流程的一部分，也不再保证和最新的 goal-swap 逻辑同步更新：
+
+- `goal_shuffle_quantitative.py`
+- `goal_inconsistent_rate.py`
+- `goal_separation_ratio.py`
+
+如果之后要重新使用这些脚本，需要先重新检查它们的样本构造假设、输出路径和指标解释。除非明确需要恢复某个 archived test，后续改动默认只围绕 active 的 goal-swap 和 goal-mask-sensitivity pipeline。
+
 ## 输出目录结构
 
-默认输出到 `test_logs/<dataset>/<script_name>/`。
+默认 baseline 输出到 `test_logs/flownav_baseline/<dataset>/<script_name>/`。
+
+当 `goal_swap_visualization.py` 使用 `--trajectory-selection cluster` 运行时，
+输出到 `test_logs/flownav_cluster/<dataset>/<script_name>/`。
 
 典型结构如下：
 
 ```text
 test_logs/
-  recon/
-    goal_shuffle_quantitative/
-    goal_swap_visualization/
-      angle10-mmd0p5-emd0p2/
-        all_samples/
-          heading_filter/
-          no_heading_filter/
-        anomaly_samples/
-          heading_filter/
-          no_heading_filter/
-    goal_inconsistent_rate/
-    goal_mask_sensitivity/
-    goal_separation_ratio/
+  flownav_baseline/
+    recon/
+      goal_swap_visualization/
+        angle10-mmd0p5-emd0p2/
+          all_samples/
+            heading_filter/
+            no_heading_filter/
+          anomaly_samples/
+            heading_filter/
+            no_heading_filter/
+    summary_figure/
+  flownav_cluster/
+    recon/
+      goal_swap_visualization/
+        angle10-mmd0p5-emd0p2/
+          all_samples/
+          anomaly_samples/
+    summary_figure/
 ```
 
 以 `goal_swap_visualization.py` 为例，文件夹名：
@@ -78,9 +103,11 @@ angle10-mmd0p5-emd0p2
 
 对于 MMD / EMD 这类分布指标，如果 goal 明显不同但数值很低，说明模型可能对 goal 不敏感，因为它在不同 goal 下生成了非常接近的轨迹分布。
 
-## 1. Goal Shuffle Quantitative
+## 已归档：Goal Shuffle Quantitative
 
 脚本：`goal_shuffle_quantitative.py`
+
+状态：暂时弃用，不属于当前主动维护的评测流程。
 
 ### 做了什么
 
@@ -124,7 +151,7 @@ python test_scripts/goal_shuffle_quantitative.py \
   --max-alternative-angle-diff-deg 90 \
   --max-direction-angle-deg 90 \
   --visualization-samples 16 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### 排查提示
@@ -133,7 +160,7 @@ python test_scripts/goal_shuffle_quantitative.py \
 - 如果 alternative goal 太极端，可以降低 `--max-alternative-angle-diff-deg`。
 - 如果匹配不到样本，可以增加 `--scan-batches` 或放宽角度限制。
 
-## 2. Goal Swap Visualization
+## 主动维护：Goal Swap Visualization
 
 脚本：`goal_swap_visualization.py`
 
@@ -154,12 +181,19 @@ python test_scripts/goal_shuffle_quantitative.py \
 - `heading_filter`：goal image 的视角/轨迹朝向也要和 left / forward / right 类别相容。
 - `no_heading_filter`：只根据 `goal_pos` 分类，不额外筛 goal image heading。
 
+trajectory selection 模式：
+
+- `baseline`：保留原始 sampled FlowNav trajectories，也就是之前 goal-swap 的行为。
+- `cluster`：每个 goal 先采样多条 trajectory，然后使用 FlowNav 共享的加权轨迹距离聚类，
+  选择最大簇的 medoid 作为该 goal 的轨迹用于指标和日志生成。内部会把选中的轨迹重复成
+  和 baseline 相同的 shape，保证现有分布指标逻辑不需要改写。
+
 ### 输出结构
 
 示例：
 
 ```text
-test_logs/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
+test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
   all_samples/
     heading_filter/
       goal_swap_global_endpoints_*.png
@@ -252,6 +286,25 @@ python test_scripts/goal_swap_visualization.py \
   --output-dir test_logs
 ```
 
+运行聚类 trajectory-selection 版本：
+
+```bash
+python test_scripts/goal_swap_visualization.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --batch-size 64 \
+  --scan-batches 200 \
+  --num-samples 8 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
+  --anomaly-mmd-threshold 0.5 \
+  --anomaly-emd-threshold 0.2 \
+  --trajectory-selection cluster \
+  --cluster-threshold 0.35 \
+  --output-dir test_logs
+```
+
 ### 排查提示
 
 - 如果 goal_pos 分布分得很开，但 endpoint 分布重叠严重，说明 goal 明确不同，但模型输出没有明显响应。
@@ -261,9 +314,11 @@ python test_scripts/goal_swap_visualization.py \
 - 如果异常样本太多，可以降低这两个阈值。
 - 如果全局图点太多，降低 `--global-endpoint-max-points-per-class`。这只影响画图下采样，不影响指标计算。
 
-## 3. Goal-Inconsistent Rate
+## 已归档：Goal-Inconsistent Rate
 
 脚本：`goal_inconsistent_rate.py`
+
+状态：暂时弃用，不属于当前主动维护的评测流程。
 
 ### 做了什么
 
@@ -290,7 +345,7 @@ python test_scripts/goal_inconsistent_rate.py \
   --max-batches 20 \
   --num-samples 8 \
   --angle-threshold-deg 45 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### 排查提示
@@ -299,23 +354,31 @@ python test_scripts/goal_inconsistent_rate.py \
 - `p90_angle_diff_deg` 或 `p95_angle_diff_deg` 高，说明尾部样本存在严重方向错误。
 - 输出文件名会包含角度阈值，例如 `goal_inconsistent_rate_angle45_*.json`，方便比较不同阈值。
 
-## 4. Goal Mask Sensitivity
+## 主动维护：Goal Mask Sensitivity
 
-脚本：`goal_mask_sensitivity.py`
+脚本：
+
+- `goal_mask_sensitivity.py`
 
 ### 做了什么
 
-这个脚本比较正常 goal image 输入和 goal-masked 输入下的轨迹分布差异。
+这个测试比较 no-heading-filter 的 left / forward / right goal-conditioned
+轨迹，和 goal-masked 轨迹之间的分布差异。
 
-如果遮住 goal 后模型输出几乎不变，说明模型可能没有强依赖 goal image。
+这里的“有 goal”指 goal-swap 使用的同场景 matched goals：从同一条 trajectory、
+同一个当前时刻选择 left / forward / right 三张未来 goal image，并且
+`filter_goal_heading=False`。这里的“无 goal”指同一个 observation 和 goal image
+走模型的 goal-mask 路径，生成不带 goal conditioning 的轨迹。
 
 ### 重点指标
 
-- goal-conditioned 和 goal-masked endpoint 均值距离。
-- endpoint cloud 的 Chamfer distance。
-- goal-conditioned 和 masked samples 之间的 ADE / FDE。
+- `endpoint_mean_l2`：goal-conditioned 和 masked endpoint 均值距离。
+- `endpoint_rbf_mmd`：goal-conditioned 和 masked endpoint 的 RBF-MMD。
+- `endpoint_sliced_wasserstein`：sliced Wasserstein distance，作为 EMD 近似。
+- `matched_sample_ade` / `matched_sample_fde`：有 goal 和无 goal 采样轨迹的 paired 差异。
+- 有 goal endpoints 内部 left / forward / right 的 direction-pair MMD/EMD，以及 masked endpoints 内部对应指标。
 
-### 运行方式
+### 定量运行方式
 
 ```bash
 python test_scripts/goal_mask_sensitivity.py \
@@ -323,19 +386,69 @@ python test_scripts/goal_mask_sensitivity.py \
   --dataset recon \
   --split test \
   --batch-size 64 \
-  --max-batches 20 \
+  --scan-batches 200 \
   --num-samples 16 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
   --output-dir test_logs
 ```
 
+运行聚类 trajectory-selection 版本：
+
+```bash
+python test_scripts/goal_mask_sensitivity.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --batch-size 64 \
+  --scan-batches 200 \
+  --num-samples 16 \
+  --angle-threshold-deg 10 \
+  --max-direction-angle-deg 90 \
+  --trajectory-selection cluster \
+  --cluster-threshold 0.35 \
+  --output-dir test_logs
+```
+
+输出：
+
+```text
+test_logs/flownav_baseline/recon/goal_mask_sensitivity/angle10-no_heading_filter/
+  goal_mask_sensitivity_summary_*.json
+  goal_mask_sensitivity_items_*.csv
+  goal_mask_sensitivity_endpoints_*.npz
+```
+
+### 可视化运行方式
+
+`goal_mask_sensitivity.py` 会在同一次测试运行中直接生成可视化图片。
+图片和 JSON / CSV / NPZ 输出保存在同一个 `goal_mask_sensitivity/<run_tag>/`
+目录下。
+
+主要可视化输出：
+
+- `goal_mask_endpoint_shift_by_direction_*.png`
+  - 三个 panel 分别是 left / forward / right。
+  - 每个 panel 叠加有 goal endpoint 和无 goal endpoint。
+  - 每个 panel 标注有 goal vs 无 goal 的 MMD、EMD 近似和 endpoint mean shift。
+
+- `goal_mask_direction_distribution_comparison_*.png`
+  - 左图：有 goal 时 left / forward / right 的 endpoint 分布。
+  - 中图：无 goal 时，按请求的 goal class 分组后的 endpoint 分布。
+  - 右图：matched goal position 分布。
+  - 前两张图会标注 direction-pair MMD 和 EMD 近似。
+
 ### 排查提示
 
-- 如果 masked 和 unmasked 的 endpoint 分布几乎一样，说明 goal image 对模型输出影响弱。
-- 如果 masked 后输出明显退化，说明模型确实使用了 goal 信息。
+- 如果有 goal 的 left / forward / right endpoints 分得开，但无 goal endpoints collapse，说明模型确实使用 goal。
+- 如果有 goal 和无 goal endpoints 几乎一样，说明 goal conditioning 弱。
+- 如果无 goal endpoints 仍然按 left / forward / right 分开，需要检查 observation 本身是否已经决定路线，或者 matched goals 是否受轨迹位置偏置影响。
 
-## 5. Goal Separation Ratio
+## 已归档：Goal Separation Ratio
 
 脚本：`goal_separation_ratio.py`
+
+状态：暂时弃用，不属于当前主动维护的评测流程。
 
 ### 做了什么
 
@@ -375,7 +488,7 @@ python test_scripts/goal_separation_ratio.py \
   --num-samples 16 \
   --angle-threshold-deg 25 \
   --max-direction-angle-deg 90 \
-  --output-dir test_logs
+  --output-dir test_logs/flownav_baseline
 ```
 
 ### 排查提示
@@ -422,12 +535,23 @@ python test_scripts/goal_separation_ratio.py \
 脚本：`generate_summary_figures.py`
 
 这个脚本不会重新跑模型。它只读取已有的 `test_logs` 输出，并在
-`test_logs/summary_figure/` 下生成论文风格的汇总图和表格。
+`test_logs/<variant>/summary_figure/` 下生成论文风格的汇总图和表格。
+
+这个脚本支持不完整实验的容错。如果某个数据集、角度、stage 或 setting
+还没跑完，脚本仍会生成当前能生成的图；缺失的图片 panel 会标成
+`missing`。同时会输出：
+
+- `missing_summary_inputs.json`
+- `missing_summary_inputs.md`
+
+这两个文件会列出缺少哪些 swap 或 mask 对比输入。
 
 运行方式：
 
 ```bash
-python3 test_scripts/generate_summary_figures.py --log-root test_logs
+python3 test_scripts/generate_summary_figures.py \
+  --log-root test_logs \
+  --variant flownav_baseline
 ```
 
 输出内容：
@@ -476,21 +600,33 @@ python3 test_scripts/generate_summary_figures.py --log-root test_logs
   - 展示 paired EMD、paired MMD、delta 和 paired sample count。
   - 这是判断 heading-filter 是否真正改善指标时最公平的图，因为它固定了评测样本集合。
 
+- `fig6_goal_mask_direction_distribution_comparison.png`
+  - 不同数据集的 `goal_mask_direction_distribution_comparison_*.png` 拼图。
+
+- `fig6_goal_mask_mmd_emd_delta.png`
+  - 不同数据集上有 goal 减无 goal 的 direction-pair MMD/EMD delta。
+  - bar 标注中会包含 delta，以及有 goal / 无 goal 的原始值。
+
 - `table1_summary.csv` 和 `table1_summary.md`
   - 多数据集 summary table，包含 matched 数量、MMD、EMD、异常数量、delta 和 heading-filter retention。
 
 - `table2_paired_improvement.csv` 和 `table2_paired_improvement.md`
   - `fig5_paired_improvement.png` 对应的数值表格。
 
+- `missing_summary_inputs.json` 和 `missing_summary_inputs.md`
+  - 记录缺少哪些 dataset / angle / setting，导致无法生成完整比较。
+
 常用参数：
 
 ```bash
 python3 test_scripts/generate_summary_figures.py \
   --log-root test_logs \
+  --variant flownav_cluster \
   --hard-cases-per-dataset 5 \
   --hard-case-min-index-gap 500
 ```
 
+- `--variant` 选择要汇总的日志命名空间：`flownav_baseline` 或 `flownav_cluster`。
 - `--hard-cases-per-dataset` 控制每个数据集展示多少个 hard case。
 - `--hard-case-min-index-gap` 控制选中的 hard case 在 `dataset_index` 上尽量相隔多远；如果样本不够，脚本会自动放宽间隔。
 

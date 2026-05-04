@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +23,7 @@ from common import (
     timestamp_name,
     write_json,
 )
+from flownav.training.utils import cluster_trajectory_samples
 
 
 DIRECTIONS = ("left", "forward", "right")
@@ -29,6 +31,10 @@ PAIRS = (("left", "forward"), ("left", "right"), ("forward", "right"))
 COLORS = {"left": "tab:blue", "forward": "tab:green", "right": "tab:red"}
 ELLIPSE_COLORS = {"left": "navy", "forward": "darkgreen", "right": "darkred"}
 NO_HEADING_COLORS = {"left": "#8a6f00", "forward": "#7a4d8f", "right": "#9b4d2e"}
+SELECTION_VARIANTS = {
+    "baseline": "flownav_baseline",
+    "cluster": "flownav_cluster",
+}
 
 
 def value_tag(value: float) -> str:
@@ -179,6 +185,57 @@ def sample_directional_trajectories(model, config, device, directional_set, num_
             .numpy()
         )
     return trajectories
+
+
+def output_root_for_selection(output_dir: str, trajectory_selection: str) -> str:
+    root = Path(output_dir)
+    variant = SELECTION_VARIANTS[trajectory_selection]
+    if root.name in set(SELECTION_VARIANTS.values()):
+        return str(root)
+    return str(root / variant)
+
+
+def select_clustered_trajectories(trajectories, cluster_threshold: float):
+    selected = {}
+    selection_info = {}
+    for name, samples in trajectories.items():
+        cluster_info = cluster_trajectory_samples(
+            samples,
+            distance_threshold=cluster_threshold,
+        )
+        selected[name] = np.repeat(
+            cluster_info["selected_trajectory"][None],
+            repeats=len(samples),
+            axis=0,
+        )
+        selection_info[name] = {
+            "selected_index": int(cluster_info["selected_index"]),
+            "selected_cluster_size": int(len(cluster_info["selected_cluster"])),
+            "num_samples": int(len(samples)),
+            "num_clusters": int(len(cluster_info["clusters"])),
+            "cluster_sizes": [int(len(cluster)) for cluster in cluster_info["clusters"]],
+        }
+    return selected, selection_info
+
+
+def apply_trajectory_selection(trajectories, args):
+    if args.trajectory_selection == "baseline":
+        return trajectories, {
+            name: {
+                "selected_index": 0,
+                "selected_cluster_size": None,
+                "num_samples": int(len(samples)),
+                "num_clusters": None,
+                "cluster_sizes": None,
+            }
+            for name, samples in trajectories.items()
+        }
+    if args.trajectory_selection == "cluster":
+        return select_clustered_trajectories(
+            trajectories,
+            cluster_threshold=args.cluster_threshold,
+        )
+    raise ValueError(f"Unsupported trajectory selection: {args.trajectory_selection}")
 
 
 def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_deg, eps):
@@ -689,6 +746,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anomaly-mmd-threshold", type=float, default=0.12)
     parser.add_argument("--anomaly-emd-threshold", type=float, default=0.45)
     parser.add_argument("--global-endpoint-max-points-per-class", type=int, default=10000)
+    parser.add_argument(
+        "--trajectory-selection",
+        choices=sorted(SELECTION_VARIANTS.keys()),
+        default="baseline",
+        help=(
+            "Trajectory selection mode for metrics and saved endpoint logs. "
+            "`baseline` keeps the sampled FlowNav trajectories; `cluster` "
+            "selects the medoid of the largest trajectory cluster per goal."
+        ),
+    )
+    parser.add_argument(
+        "--cluster-threshold",
+        type=float,
+        default=0.35,
+        help="Weighted trajectory distance threshold used by --trajectory-selection cluster.",
+    )
     parser.add_argument("--kl-eps", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
@@ -725,8 +798,12 @@ def main() -> None:
     log("Dataloader ready.")
     transform = imagenet_transform()
 
-    parent_output_dir = ensure_output_dir(
+    selection_output_root = output_root_for_selection(
         args.output_dir,
+        args.trajectory_selection,
+    )
+    parent_output_dir = ensure_output_dir(
+        selection_output_root,
         args.dataset,
         "goal_swap_visualization",
         swap_run_tag(
@@ -758,6 +835,11 @@ def main() -> None:
 
         summary = {
             "test": "goal_swap_visualization",
+            "trajectory_selection": args.trajectory_selection,
+            "output_variant": SELECTION_VARIANTS[args.trajectory_selection],
+            "cluster_threshold": (
+                args.cluster_threshold if args.trajectory_selection == "cluster" else None
+            ),
             "stage": stage_name,
             "config": args.config,
             "checkpoint": checkpoint_path,
@@ -804,15 +886,19 @@ def main() -> None:
                 directional_set=directional_set,
                 num_samples=args.num_samples,
             )
+            metric_trajectories, selection_info = apply_trajectory_selection(
+                trajectories,
+                args,
+            )
             metrics = compute_sensitivity_metrics(
-                trajectories=trajectories,
+                trajectories=metric_trajectories,
                 directional_set=directional_set,
                 angle_threshold_deg=args.angle_threshold_deg,
                 eps=args.kl_eps,
             )
             for name in DIRECTIONS:
                 all_endpoints[name].extend(
-                    trajectories[name][:, -1].astype(float).tolist()
+                    metric_trajectories[name][:, -1].astype(float).tolist()
                 )
                 all_goals[name].append(
                     np.asarray(
@@ -833,13 +919,22 @@ def main() -> None:
                     for key, value in metrics.items()
                     if isinstance(value, (float, int, bool))
                 },
+                "trajectory_selection": args.trajectory_selection,
+                "cluster_threshold": (
+                    args.cluster_threshold
+                    if args.trajectory_selection == "cluster"
+                    else None
+                ),
+                "selection_info": selection_info,
             }
             metric_rows.append(row)
             if anomalous and save_anomalies:
-                anomaly_sets.append((item_idx, directional_set, metrics, trajectories))
+                anomaly_sets.append(
+                    (item_idx, directional_set, metrics, metric_trajectories, selection_info)
+                )
                 for name in DIRECTIONS:
                     anomaly_endpoints[name].extend(
-                        trajectories[name][:, -1].astype(float).tolist()
+                        metric_trajectories[name][:, -1].astype(float).tolist()
                     )
                     anomaly_goals[name].append(
                         np.asarray(
@@ -852,7 +947,7 @@ def main() -> None:
         if save_anomalies:
             anomaly_txt_path = output_dir / "anomaly_indices.txt"
             with open(anomaly_txt_path, "w") as f:
-                for item_idx, directional_set, metrics, _ in anomaly_sets:
+                for item_idx, directional_set, metrics, _, _ in anomaly_sets:
                     source = directional_set["base_source"]
                     f.write(
                         f"{item_idx}\tdataset_index={source['dataset_index']}\t"
@@ -888,7 +983,13 @@ def main() -> None:
             anomaly_global_endpoint_path = None
             anomaly_pair_metrics = None
 
-        for anomaly_rank, (item_idx, directional_set, metrics, trajectories) in enumerate(
+        for anomaly_rank, (
+            item_idx,
+            directional_set,
+            metrics,
+            trajectories,
+            selection_info,
+        ) in enumerate(
             anomaly_sets
         ):
             source = directional_set["base_source"]
@@ -913,6 +1014,7 @@ def main() -> None:
                 num_samples=args.num_samples,
                 output_path=png_path,
                 title="Goal swap visualization: same observation, matched goals",
+                precomputed_trajectories=trajectories,
             )
             plot_endpoint_distribution(
                 trajectories=trajectories,
@@ -935,6 +1037,14 @@ def main() -> None:
                     "max_direction_angle_deg": args.max_direction_angle_deg,
                     "max_endpoint_goal_dist": args.max_endpoint_goal_dist,
                     "filter_goal_heading": filter_goal_heading,
+                    "trajectory_selection": args.trajectory_selection,
+                    "output_variant": SELECTION_VARIANTS[args.trajectory_selection],
+                    "cluster_threshold": (
+                        args.cluster_threshold
+                        if args.trajectory_selection == "cluster"
+                        else None
+                    ),
+                    "selection_info": selection_info,
                     "anomaly_metrics": metrics,
                     "sampled_endpoints": {
                         name: trajectories[name][:, -1].astype(float).tolist()
@@ -1030,6 +1140,11 @@ def main() -> None:
         comparison_summary_path,
         {
             "test": "goal_swap_heading_filter_comparison",
+            "trajectory_selection": args.trajectory_selection,
+            "output_variant": SELECTION_VARIANTS[args.trajectory_selection],
+            "cluster_threshold": (
+                args.cluster_threshold if args.trajectory_selection == "cluster" else None
+            ),
             "stage": "all_samples",
             "config": args.config,
             "checkpoint": checkpoint_path,
