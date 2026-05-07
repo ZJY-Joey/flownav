@@ -21,6 +21,7 @@ Current active scope:
 - `goal_swap_visualization.py`
 - `dist_head_backfill.py`
 - `topomap_subgoal_analysis.py`
+- `recon_head_horizon_summary.py`
 - `goal_mask_sensitivity.py`
 - `generate_summary_figures.py`
 - `common.py`, only for utilities used by the active scripts
@@ -98,6 +99,36 @@ For matched left/forward/right tests:
 
 This constructs same-scene, same-observation, different-goal tests instead of
 invalid random goal swaps.
+
+## Goal Images, Subgoals, and Flow-Head Inputs
+
+The goal condition is not the same object in training, offline tests, and
+deployment:
+
+| Context | Flow-head condition |
+| --- | --- |
+| Normal training | A future `goal image` sampled by the dataset. There is no subgoal-selection step. |
+| `goal_swap_visualization.py` | Matched left/forward/right future `goal image`s from the same trajectory and same `curr_time`. These are not subgoals. |
+| `goal_mask_sensitivity.py` | The with-goal branch uses matched future `goal image`s; the masked branch uses the goal-mask path. These are not subgoals. |
+| File-based inference, e.g. `infer_rgb.py` / `benchmark_flownav.py` | The `goal image` explicitly provided by the command or data. |
+| Deployment topomap navigation | `dist_pred_net` scores candidate node images in a local topomap window, then the selected local topomap subgoal image is used as the flow-head goal condition. |
+
+The model does not directly consume `(x, y)` goal poses. `goal_pos` /
+`goal_pos_metric` are geometric quantities computed by the test scripts from
+the trajectory, used for left/forward/right classification, horizon bucketing,
+plotting, and metrics.
+
+The deployment-style local subgoal rule is:
+
+```python
+closest_idx = argmin(dist_pred(topomap_window_images))
+subgoal_idx = closest_idx + int(dists[closest_idx] < close_threshold)
+```
+
+`close_threshold` is in the distance-head prediction units, not necessarily
+meters. For `recon`, `metric_waypoint_spacing=0.25`; with `waypoint_spacing=1`
+and frequent advancement to the next topomap node, the mean selected local
+subgoal distance can be near `0.25m`.
 
 ## Main Metrics
 
@@ -627,7 +658,10 @@ logs.
 
 The main metrics are:
 
-- `dist_pred_pair_l2`
+- `dist_pred_pair_l1` / `dist_pred_pair_l2`: mean absolute / L2 difference
+  between `dist_pred` outputs for different matched goal images under the same
+  observation. This measures dist-head response magnitude to goal-image changes;
+  it is not an error against GT distance.
 - `goal_pos_pair_distance`
 - `dist_pred_goal_normalized_sensitivity`
 - `dist_pred_rank_accuracy`
@@ -802,6 +836,96 @@ python3 test_scripts/topomap_subgoal_analysis.py \
   --swap-log-root test_logs_horizon \
   --montage-only
 ```
+
+## Recon Head Horizon Summary
+
+File: `recon_head_horizon_summary.py`
+
+This is a focused `recon`-only experiment for jointly inspecting final goal
+poses, deployment-style local topomap subgoals, and optional
+subgoal-conditioned flow endpoints.
+
+Default output directory:
+
+```text
+test_logs_horizon/flownav_baseline/head_horizon_summary/
+```
+
+Core definitions:
+
+- Direction is assigned by the final goal pose bearing in the current robot
+  local frame: `left > 10 deg`, `forward = [-10 deg, 10 deg]`,
+  `right < -10 deg`.
+- Horizon buckets use Euclidean final-goal distance in the current robot local
+  frame: `short=[0,2)m`, `mid=[2,4)m`, `long=[4,max_offset_range]`.
+- For the same observation and same direction, the script selects one short,
+  one mid, and one long final goal image.
+- The local topomap subgoal is selected with the deployment-style dist-head
+  rule. It is not a geometric interpolation from the final goal pose.
+
+Default run computes dist-head/local-subgoal outputs only and does not run the
+flow head:
+
+```bash
+python3 test_scripts/recon_head_horizon_summary.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test
+```
+
+Main outputs:
+
+- `fig_recon_head_horizon_distribution.png`
+  - 1x3 figure with left / forward / right columns.
+  - Overlays final goal-pose and selected local subgoal distributions.
+  - Uses different colors for short / mid / long and annotates subgoal-vs-goal
+    MMD and EMD approximation.
+
+- `fig_recon_head_horizon_local_subgoals.png`
+  - 1x3 figure with only selected local topomap subgoals.
+  - Use it to check whether different final-goal buckets collapse to the same
+    local subgoal.
+
+- `fig_recon_head_horizon_metrics.png`
+  - 2x2 figure.
+  - Top row: raw MMD and EMD approximation between subgoals and final goal
+    poses.
+  - Bottom left: mean selected-subgoal distance to the robot.
+  - Bottom right: mean final-goal-pose distance to the robot.
+
+- `recon_head_horizon_items_*.csv`
+  - Per observation / direction / bucket selected goal, selected subgoal,
+    dist-head prediction, and topomap window information.
+
+- `recon_head_horizon_metrics_*.csv`
+  - Per direction / bucket distribution metrics and mean distances.
+
+To force the flow head to use the selected local subgoal image as its goal
+condition, explicitly enable GC-only flow sampling:
+
+```bash
+python3 test_scripts/recon_head_horizon_summary.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --num-flow-samples 8
+```
+
+Additional outputs:
+
+- `fig_recon_head_horizon_subgoal_conditioned_flow.png`
+  - 3x2 figure.
+  - Rows are left / forward / right.
+  - Left column: GC flow endpoint distribution conditioned on the selected
+    subgoal image.
+  - Right column: corresponding selected subgoal distribution.
+
+- `recon_head_horizon_subgoal_flow_endpoints_*.csv`
+  - Endpoint rows for every subgoal-conditioned GC sample.
+
+Note: `--num-flow-samples` defaults to `0` because flow ODE sampling for every
+selected subgoal is expensive. Enable it only when the flow figure is needed.
+The implementation runs only the GC branch, not the UC branch.
 
 ## Summary Figure Generation
 

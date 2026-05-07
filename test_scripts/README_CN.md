@@ -17,6 +17,7 @@
 - `goal_swap_visualization.py`
 - `dist_head_backfill.py`
 - `topomap_subgoal_analysis.py`
+- `recon_head_horizon_summary.py`
 - `goal_mask_sensitivity.py`
 - `generate_summary_figures.py`
 - `common.py` 中被上述脚本使用的公共工具
@@ -88,6 +89,29 @@ angle10-mmd0p5-emd0p2
 - heading filter 会额外检查 goal image 对应时间点的轨迹朝向，避免 goal image 明显朝向相反方向。
 
 这套机制的目标是：构造“同一场景、同一当前 observation、不同方向 goal”的测试，而不是把不相关场景随机拼在一起。
+
+## Goal Image、Subgoal 和 Flow Head 输入
+
+训练、离线测试和部署里的 goal 条件不是同一个概念，后续读图时要先区分：
+
+| 场景 | flow head 使用的条件 |
+| --- | --- |
+| 正常训练 | 数据集采样出来的未来 `goal image`。没有先选 subgoal。 |
+| `goal_swap_visualization.py` | 同一 trajectory、同一 `curr_time` 下匹配出的 left / forward / right 未来 `goal image`。不是 subgoal。 |
+| `goal_mask_sensitivity.py` | 有 goal 分支使用 matched future `goal image`；masked 分支走 goal-mask 路径。不是 subgoal。 |
+| 普通文件推理，如 `infer_rgb.py` / `benchmark_flownav.py` | 命令行或数据中直接提供的 `goal image`。 |
+| deployment topomap navigation | `dist_pred_net` 先在局部 topomap window 里给候选 node image 打分，再把 selected local topomap subgoal image 作为 flow head 的 goal 条件。 |
+
+模型本身不直接吃 `(x, y)` goal pose。`goal_pos` / `goal_pos_metric` 是测试脚本从轨迹中计算出的局部坐标几何量，用来分类 left / forward / right、做 horizon 分桶、画图和算指标。
+
+deployment 风格的局部 subgoal 选择逻辑是：
+
+```python
+closest_idx = argmin(dist_pred(topomap_window_images))
+subgoal_idx = closest_idx + int(dists[closest_idx] < close_threshold)
+```
+
+`close_threshold` 用的是 dist head 的预测距离单位，不一定是米。对于 `recon`，`metric_waypoint_spacing=0.25`，当 `waypoint_spacing=1` 且经常推进到下一个 topomap node 时，局部 selected subgoal 的均值距离会接近 `0.25m`。
 
 ## 主要指标总览
 
@@ -588,7 +612,9 @@ summary 脚本只读取最新 backfill。它不会删除原始 goal-swap summary
 
 主要指标：
 
-- `dist_pred_pair_l2`
+- `dist_pred_pair_l1` / `dist_pred_pair_l2`：同一个 observation 下，不同 matched goal image 的
+  `dist_pred` 输出之间的平均绝对差 / L2 差。它衡量 dist head 对 goal image 的响应幅度，
+  不是预测距离和 GT 距离之间的误差。
 - `goal_pos_pair_distance`
 - `dist_pred_goal_normalized_sensitivity`
 - `dist_pred_rank_accuracy`
@@ -750,6 +776,83 @@ python3 test_scripts/topomap_subgoal_analysis.py \
   --swap-log-root test_logs_horizon \
   --montage-only
 ```
+
+## Recon Head Horizon Summary
+
+脚本：`recon_head_horizon_summary.py`
+
+这个脚本是针对 `recon` 的单数据集实验，用来同时观察 final goal pose、deployment-style
+local topomap subgoal，以及可选的 subgoal-conditioned flow endpoint。
+
+默认输出目录：
+
+```text
+test_logs_horizon/flownav_baseline/head_horizon_summary/
+```
+
+核心定义：
+
+- 方向按当前机器人局部坐标系下 goal pose 角度划分：
+  `left > 10 deg`，`forward = [-10 deg, 10 deg]`，`right < -10 deg`。
+- horizon bucket 按当前机器人局部坐标系下 goal pose 欧式距离划分：
+  `short=[0,2)m`，`mid=[2,4)m`，`long=[4,max_offset_range]`。
+- 对同一个 observation，同一方向分别选择 short / mid / long 三个 final goal image。
+- local topomap subgoal 使用 deployment 风格的 dist-head 选择逻辑，不是根据 final goal pose 直接插值得到的中间点。
+
+默认运行只计算 dist-head/local-subgoal 相关输出，不跑 flow head：
+
+```bash
+python3 test_scripts/recon_head_horizon_summary.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test
+```
+
+主要输出：
+
+- `fig_recon_head_horizon_distribution.png`
+  - 1x3 图，三列是 left / forward / right。
+  - 同时画 final goal pose 和 selected local subgoal 分布。
+  - short / mid / long 用不同颜色，并标注 subgoal vs goal pose 的 MMD / EMD 近似。
+
+- `fig_recon_head_horizon_local_subgoals.png`
+  - 1x3 图，只画 selected local topomap subgoal。
+  - 用它检查不同 final-goal bucket 是否 collapse 到同一个局部 subgoal。
+
+- `fig_recon_head_horizon_metrics.png`
+  - 2x2 图。
+  - 上排是 subgoal vs goal pose 的 MMD 和 EMD 近似 raw 值。
+  - 左下是 selected subgoal 到机器人原点的均值距离。
+  - 右下是 final goal pose 到机器人原点的均值距离。
+
+- `recon_head_horizon_items_*.csv`
+  - 每个 observation / direction / bucket 的 selected goal、selected subgoal、dist-head 预测和 topomap window 信息。
+
+- `recon_head_horizon_metrics_*.csv`
+  - 每个 direction / bucket 的分布指标和均值距离。
+
+如果要强制用 selected local subgoal image 作为 flow head 的 goal 条件，再显式打开 GC-only flow sampling：
+
+```bash
+python3 test_scripts/recon_head_horizon_summary.py \
+  --config flownav/config/flownav.yaml \
+  --dataset recon \
+  --split test \
+  --num-flow-samples 8
+```
+
+额外输出：
+
+- `fig_recon_head_horizon_subgoal_conditioned_flow.png`
+  - 3x2 图。
+  - 每行是 left / forward / right。
+  - 左列是用 selected subgoal image 条件化后的 GC flow endpoint 分布。
+  - 右列是对应 selected subgoal 分布。
+
+- `recon_head_horizon_subgoal_flow_endpoints_*.csv`
+  - 每条 subgoal-conditioned GC sample 的 endpoint。
+
+注意：`--num-flow-samples` 默认是 `0`，因为对每个 selected subgoal 做 flow ODE sampling 很耗时。需要这张 flow 图时再显式设置。当前实现只跑 GC branch，不跑 UC branch。
 
 ## Summary Figure Generation
 
