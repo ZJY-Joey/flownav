@@ -1,0 +1,27 @@
+config: flownav/config/flownav.yaml
+datasets: recon, go_stanford, sacson, scand
+splits: train, test
+default_hz: 4.0
+
+Duration summary:
+  recon: 42.424 h
+  go_stanford: 13.759 h
+  sacson: 16.281 h
+  scand: 0.563 h
+  ALL: 73.028 h
+
+dataset      split  traj   missing  steps    min  median  mean   max   hz   duration
+-----------  -----  -----  -------  -------  ---  ------  -----  ----  ---  --------
+recon        train  9468   0        489462   1    35.0    51.7   626   4.0  33.990 h
+recon        test   2367   0        121449   1    35.0    51.3   659   4.0  8.434 h 
+go_stanford  train  2956   0        159919   1    23.0    54.1   849   4.0  11.105 h
+go_stanford  test   740    0        38207    1    24.0    51.6   720   4.0  2.653 h 
+sacson       train  2283   0        195265   1    29.0    85.5   1353  4.0  13.560 h
+sacson       test   571    0        39182    1    21.0    68.6   606   4.0  2.721 h 
+scand        train  15     0        6184     1    364.0   412.3  1195  4.0  0.429 h 
+scand        test   4      0        1930     196  507.5   482.5  719   4.0  0.134 h 
+recon        total  11835  0        610911   -    -       -      -     4.0  42.424 h
+go_stanford  total  3696   0        198126   -    -       -      -     4.0  13.759 h
+sacson       total  2854   0        234447   -    -       -      -     4.0  16.281 h
+scand        total  19     0        8114     -    -       -      -     4.0  0.563 h 
+ALL          total  18404  0        1051598  -    -       -      -     4.0  73.028 h
