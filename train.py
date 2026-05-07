@@ -21,6 +21,8 @@ from warmup_scheduler import GradualWarmupScheduler
 
 
 def main(config: dict) -> None:
+    train_model = bool(config["train"])
+
     # Set up the device
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -61,6 +63,8 @@ def main(config: dict) -> None:
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
         for data_split_type in ["train", "test"]:
+            if data_split_type == "train" and not train_model:
+                continue
             if data_split_type in data_config:
                 dataset = ViNT_Dataset(
                     data_folder=data_config["data_folder"],
@@ -89,22 +93,24 @@ def main(config: dict) -> None:
                     if dataset_type not in test_dataloaders:
                         test_dataloaders[dataset_type] = {}
                     test_dataloaders[dataset_type] = dataset
-    train_dataset = ConcatDataset(train_dataset)
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=False,
-    )
-    click.echo(
-        click.style(
-            f">> Loaded {len(train_dataset)} training samples",
-            fg="cyan",
-            bold=True,
+    train_loader = None
+    if train_model:
+        train_dataset = ConcatDataset(train_dataset)
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=False,
         )
-    )
+        click.echo(
+            click.style(
+                f">> Loaded {len(train_dataset)} training samples",
+                fg="cyan",
+                bold=True,
+            )
+        )
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
     for dataset_type, dataset in test_dataloaders.items():
@@ -147,16 +153,40 @@ def main(config: dict) -> None:
     )
     lr = float(config["lr"])
     config["optimizer"] = config["optimizer"].lower()
-    optimizer = AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer=optimizer, T_max=config["epochs"]
+    optimizer = None
+    scheduler = None
+    if train_model:
+        optimizer = AdamW(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer, T_max=config["epochs"]
+        )
+        scheduler = GradualWarmupScheduler(
+            optimizer=optimizer,
+            multiplier=1,
+            total_epoch=config["warmup_epochs"],
+            after_scheduler=scheduler,
+        )
+
+    # Load Depth-Anything pre-trained weights before an optional FlowNav checkpoint,
+    # so resumed/evaluated checkpoints keep their trained depth encoder weights.
+    checkpoint = torch.load(
+        config["depth"]["weights_path"],
+        map_location=device,
     )
-    scheduler = GradualWarmupScheduler(
-        optimizer=optimizer,
-        multiplier=1,
-        total_epoch=config["warmup_epochs"],
-        after_scheduler=scheduler,
+    saved_state_dict = (
+        checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
     )
+    updated_state_dict = {
+        k.replace("pretrained.", ""): v
+        for k, v in saved_state_dict.items()
+        if "pretrained" in k
+    }
+    new_state_dict = {
+        k: v
+        for k, v in updated_state_dict.items()
+        if k in model.vision_encoder.depth_encoder.state_dict()
+    }
+    model.vision_encoder.depth_encoder.load_state_dict(new_state_dict, strict=False)
 
     # Load pre-trained model if specified
     current_epoch = 0
@@ -186,30 +216,10 @@ def main(config: dict) -> None:
             model.load_state_dict(latest_checkpoint, strict=True)
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
-        if "optimizer" in latest_checkpoint:
+        if train_model and optimizer is not None and "optimizer" in latest_checkpoint:
             optimizer.load_state_dict(latest_checkpoint["optimizer"].state_dict())
-        if scheduler is not None and "scheduler" in latest_checkpoint:
+        if train_model and scheduler is not None and "scheduler" in latest_checkpoint:
             scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
-
-    # Load Depth-Anything pre-trained weights
-    checkpoint = torch.load(
-        config["depth"]["weights_path"],
-        map_location=device,
-    )
-    saved_state_dict = (
-        checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    )
-    updated_state_dict = {
-        k.replace("pretrained.", ""): v
-        for k, v in saved_state_dict.items()
-        if "pretrained" in k
-    }
-    new_state_dict = {
-        k: v
-        for k, v in updated_state_dict.items()
-        if k in model.vision_encoder.depth_encoder.state_dict()
-    }
-    model.vision_encoder.depth_encoder.load_state_dict(new_state_dict, strict=False)
 
     # Multi-GPU setup
     if len(config["gpu_ids"]) > 1:
@@ -218,7 +228,7 @@ def main(config: dict) -> None:
 
     # Run the training loop
     main_loop(
-        train_model=config["train"],
+        train_model=train_model,
         model=model,
         optimizer=optimizer,
         lr_scheduler=scheduler,
@@ -239,13 +249,11 @@ def main(config: dict) -> None:
         eval_fraction=config["eval_fraction"],
         eval_freq=config["eval_freq"],
     )
-    click.echo(
-        click.style(
-            f">> Training completed. Model saved to {config['project_folder']}",
-            fg="green",
-            bold=True,
-        )
-    )
+    if train_model:
+        message = f">> Training completed. Model saved to {config['project_folder']}"
+    else:
+        message = f">> Evaluation completed. Logs saved to {config['project_folder']}"
+    click.echo(click.style(message, fg="green", bold=True))
 
 
 if __name__ == "__main__":
@@ -256,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         "-c",
-        default="config/flownav.yaml",
+        default="flownav/config/flownav.yaml",
         type=str,
         help="Path to the config file",
     )

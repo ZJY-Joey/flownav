@@ -1,5 +1,5 @@
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import click
 import torch
@@ -16,9 +16,9 @@ from flownav.training.train import train
 def main_loop(
     train_model: bool,
     model: nn.Module,
-    optimizer: Adam,
-    lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
-    train_loader: DataLoader,
+    optimizer: Optional[Adam],
+    lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    train_loader: Optional[DataLoader],
     test_dataloaders: Dict[str, DataLoader],
     transform: transforms,
     goal_mask_prob: float,
@@ -41,33 +41,64 @@ def main_loop(
     # Create EMA model
     ema_model = EMAModel(model=model, power=0.75)
 
-    # Run the epochs
-    for epoch in range(current_epoch, current_epoch + epochs):
-        if train_model:
+    if not train_model:
+        for dataset_type in test_dataloaders:
             click.echo(
                 click.style(
-                    f"> Start epoch {epoch}/{current_epoch + epochs - 1}",
-                    fg="magenta",
+                    f"> Evaluating {dataset_type} dataset",
+                    fg="blue",
                 )
             )
-            train(
-                model=model,
+            loader = test_dataloaders[dataset_type]
+            evaluate(
+                eval_type=dataset_type,
                 ema_model=ema_model,
-                optimizer=optimizer,
-                dataloader=train_loader,
+                dataloader=loader,
                 transform=transform,
                 device=device,
                 goal_mask_prob=goal_mask_prob,
                 project_folder=project_folder,
-                epoch=epoch,
+                epoch=current_epoch,
                 print_log_freq=print_log_freq,
-                wandb_log_freq=wandb_log_freq,
-                image_log_freq=image_log_freq,
                 num_images_log=num_images_log,
+                wandb_log_freq=wandb_log_freq,
                 use_wandb=use_wandb,
-                alpha=alpha,
+                eval_fraction=eval_fraction,
             )
-            lr_scheduler.step()
+        if use_wandb:
+            wandb.log({})
+        return
+
+    assert optimizer is not None
+    assert lr_scheduler is not None
+    assert train_loader is not None
+
+    # Run the epochs
+    for epoch in range(current_epoch, current_epoch + epochs):
+        click.echo(
+            click.style(
+                f"> Start epoch {epoch}/{current_epoch + epochs - 1}",
+                fg="magenta",
+            )
+        )
+        train(
+            model=model,
+            ema_model=ema_model,
+            optimizer=optimizer,
+            dataloader=train_loader,
+            transform=transform,
+            device=device,
+            goal_mask_prob=goal_mask_prob,
+            project_folder=project_folder,
+            epoch=epoch,
+            print_log_freq=print_log_freq,
+            wandb_log_freq=wandb_log_freq,
+            image_log_freq=image_log_freq,
+            num_images_log=num_images_log,
+            use_wandb=use_wandb,
+            alpha=alpha,
+        )
+        lr_scheduler.step()
 
         # Save the model, EMA model, optimizer, and scheduler
         numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
@@ -81,11 +112,13 @@ def main_loop(
 
         numbered_path = os.path.join(project_folder, f"optimizer_{epoch}.pth")
         latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
-        torch.save(optimizer.state_dict(), latest_optimizer_path)
+        if optimizer is not None:
+            torch.save(optimizer.state_dict(), latest_optimizer_path)
 
         numbered_path = os.path.join(project_folder, f"scheduler_{epoch}.pth")
         latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
-        torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
+        if lr_scheduler is not None:
+            torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
 
         # In case of evaluation
         if (epoch + 1) % eval_freq == 0:
