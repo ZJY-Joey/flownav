@@ -157,4 +157,5 @@ conditional-flow-matching/
 *.mp4
 *.webm
 test_logs/
+test_logs_horizon/
 

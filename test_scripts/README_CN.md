@@ -15,6 +15,8 @@
 当前主动维护范围：
 
 - `goal_swap_visualization.py`
+- `dist_head_backfill.py`
+- `topomap_subgoal_analysis.py`
 - `goal_mask_sensitivity.py`
 - `generate_summary_figures.py`
 - `common.py` 中被上述脚本使用的公共工具
@@ -176,10 +178,11 @@ python test_scripts/goal_shuffle_quantitative.py \
 4. 比较不同 goal 下的 endpoint 分布、平均轨迹、heading、DTW、Frechet、MMD、EMD 近似等。
 5. 如果不同 goal 下的 endpoint 分布过于相似，则把该样本标为异常样本。
 
-脚本会自动跑两套设置：
+脚本默认会跑两套设置。可以用 `--heading-filter-mode` 只跑其中一套：
 
 - `heading_filter`：goal image 的视角/轨迹朝向也要和 left / forward / right 类别相容。
 - `no_heading_filter`：只根据 `goal_pos` 分类，不额外筛 goal image heading。
+- `both`：同时跑两套，并在父目录生成 heading-filter 对比图。
 
 trajectory selection 模式：
 
@@ -225,6 +228,14 @@ test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
 - `anomaly_samples/`
   - 先根据 MMD / EMD 阈值筛出异常样本。
   - 再输出异常样本的三列 goal swap 图、endpoint 分布图、JSON 详情和 `anomaly_indices.txt`。
+  - horizon 分桶实验会自动跳过这一阶段：只要设置了任意
+    `--min/--max-goal-offset` 或 `--min/--max-goal-pos-dist` 参数，就只跑
+    `all_samples`，不做 anomaly 测试。
+  - horizon 分桶实验也允许方向不完整。如果一个 matched observation 只有
+    left / forward / right 中的一类或两类，脚本只对已有方向采样，并且只计算已有
+    direction pair 的指标。普通非 horizon 的 `test_logs` swap 仍然要求三类方向都存在。
+  - 如果某个 horizon bucket 完全没有任何 directional goal，脚本会写一个带
+    `scan_error` 的空 summary，而不是中断整个 sweep。
 
 - `goal_swap_global_endpoints_*.png`
   - 左图：left / forward / right 三种 goal 下的 sampled endpoint 分布。
@@ -282,8 +293,16 @@ python test_scripts/goal_swap_visualization.py \
   --max-direction-angle-deg 90 \
   --anomaly-mmd-threshold 0.5 \
   --anomaly-emd-threshold 0.2 \
+  --heading-filter-mode no_heading_filter \
   --global-endpoint-max-points-per-class 10000 \
+  --global-metric-max-points-per-class 5000 \
   --output-dir test_logs
+```
+
+如果某次普通全量测试也不想输出 anomaly 结果，可以额外加：
+
+```bash
+--skip-anomaly-stage
 ```
 
 运行聚类 trajectory-selection 版本：
@@ -312,7 +331,9 @@ python test_scripts/goal_swap_visualization.py \
 - 如果 heading_filter 和 no_heading_filter 差异很大，说明 goal image 视角筛选对这个数据集很重要。
 - 如果异常样本太少，可以增大 `--anomaly-mmd-threshold` 或 `--anomaly-emd-threshold`。
 - 如果异常样本太多，可以降低这两个阈值。
-- 如果全局图点太多，降低 `--global-endpoint-max-points-per-class`。这只影响画图下采样，不影响指标计算。
+- 如果全局图点太多，降低 `--global-endpoint-max-points-per-class`。这只影响画图下采样。
+- `--global-metric-max-points-per-class` 控制全局 pairwise MMD / EMD
+  每个方向最多使用多少点，默认 5000，用来避免 O(N^2) 内存爆炸；单样本指标仍使用全部采样轨迹。
 
 ## 已归档：Goal-Inconsistent Rate
 
@@ -530,7 +551,207 @@ python test_scripts/goal_separation_ratio.py \
 --angle-threshold-deg 10 --max-direction-angle-deg 90
 ```
 
-## Summary Figure 汇总图生成
+控制 matched goal 在当前局部坐标系下的米制距离：
+
+```bash
+--min-goal-pos-dist 8 --max-goal-pos-dist 12
+```
+
+这个筛选使用的是 `norm(goal_pos[:2])`。它不同于
+`--min-goal-offset/--max-goal-offset`，后者筛选的是未来轨迹 index / 时间偏移，
+不是米制距离。
+
+在 `goal_swap_visualization.py` 中，只要设置了任意
+`--min/--max-goal-offset` 或 `--min/--max-goal-pos-dist`，就会被视为 horizon
+分桶实验：脚本只写 `all_samples`，自动跳过 anomaly 测试，并且不再强制同一个
+matched observation 必须同时存在 left / forward / right 三类 goal。
+
+## Head-Level 工具
+
+## Dist Head Backfill
+
+脚本：`dist_head_backfill.py`
+
+这个脚本复用已有 `goal_swap_visualization_summary_*.json` 中的 matched
+样本，只运行 vision encoder 和 `dist_pred_net`，不会重新运行 flow head，也不会重新做
+diffusion sampling。
+
+对于每个固定 observation 和 left / forward / right goals，它会把结果写到源
+goal-swap summary 所在目录：
+
+- `dist_head_backfill_summary_*.json`
+- `dist_head_backfill_items_*.csv`
+
+每次写入前，脚本会先删除同一个输出目录下旧的
+`dist_head_backfill_summary_*.json` 和 `dist_head_backfill_items_*.csv`，确保后续
+summary 脚本只读取最新 backfill。它不会删除原始 goal-swap summary、图片或其他日志。
+
+主要指标：
+
+- `dist_pred_pair_l2`
+- `goal_pos_pair_distance`
+- `dist_pred_goal_normalized_sensitivity`
+- `dist_pred_rank_accuracy`
+- `dist_pred_goal_offset_spearman`
+- `flow_endpoint_pair_distance`，直接复用已有 goal-swap summary 中的 flow endpoint 指标
+- `flow_goal_normalized_sensitivity`
+- `flow_vs_dist_goal_normalized_ratio`
+- `flow_goal_direction_alignment`，只有在新增 endpoint mean logging 之后生成的 goal-swap summary 中才可用
+
+对 baseline 下所有 all-samples goal-swap summary 补跑：
+
+```bash
+python3 test_scripts/dist_head_backfill.py \
+  --log-root test_logs \
+  --variant flownav_baseline \
+  --keep-going
+```
+
+只对单个已有 summary 补跑：
+
+```bash
+python3 test_scripts/dist_head_backfill.py \
+  --summary-path test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p2-emd1/all_samples/no_heading_filter/goal_swap_visualization_summary_YYYYMMDD_HHMMSS.json
+```
+
+## Focused Head/Goal Response Figures
+
+脚本：`generate_head_horizon_figures.py`
+
+这个脚本生成针对 head-level goal response 的核心图：
+
+- `fig_dist_pred_by_goal_pos_dist.png`
+  - 一行三列，每列对应一个数据集。
+  - 每个 panel 直接画 dist-head backfill 中每个 direction 的
+    局部米制 goal distance `norm(goal_pos[:2])` 和 `dist_pred` 数值。
+  - 用它判断 `dist_pred` 是否随局部 goal distance 改变，以及 left / forward /
+    right 是否落在不同数值区间。
+
+- `fig_endpoint_goal_distribution_by_horizon.png`
+  - dataset x horizon bucket 拼图。
+  - 行是数据集，列是 short / mid / long 局部 goal-distance bucket。
+  - 每个 panel 复用对应 horizon swap 的 global endpoint 图，里面同时包含
+    endpoint 分布和 matched goal-position 分布。
+  - 用它检查 flow endpoint 是否随 goal offset 改变，以及 endpoint cluster
+    是否跟随 goal-position cluster。
+
+- `fig_endpoint_mmd_emd_by_horizon.png`
+  - short / mid / long 局部 goal-distance bucket 上的两栏折线图。
+  - 每个 dataset 是一条线。
+  - 左图是 mean endpoint RBF-MMD，右图是 mean endpoint sliced Wasserstein。
+  - 用它检查 goal 距离变长时 endpoint distribution 的可分离程度是否下降或异常变化。
+
+- `fig_flow_vs_dist_sensitivity_by_horizon.png`
+  - 原始响应幅度对比。flow 使用 endpoint pair distance，dist 使用 `dist_pred`
+    pair difference。两者不是同量纲。
+
+- `fig_goal_normalized_flow_vs_dist_sensitivity_by_horizon.png`
+  - goal-space 校准后的对比。
+  - flow sensitivity 是 endpoint pair distance 除以 goal-pose pair distance。
+  - dist sensitivity 是 `dist_pred` pair difference 除以 goal-pose pair distance。
+  - ratio panel 比较的是这两个归一化 sensitivity。
+
+脚本还会输出 CSV 方便查数：
+
+- `head_level_summary.csv`
+- `dist_pred_goal_pos_dist_items.csv`
+- `horizon_mask_summary.csv`
+- `horizon_swap_summary.csv`
+- `horizon_head_level_summary.csv`
+- `endpoint_distribution_images.csv`
+- `missing_or_counts.json`
+
+运行方式：
+
+```bash
+python3 test_scripts/generate_head_horizon_figures.py \
+  --head-log-root test_logs \
+  --horizon-root test_logs_horizon \
+  --variant flownav_baseline \
+  --output-dir test_logs_horizon/flownav_baseline/head_horizon_summary
+```
+
+## Topomap Subgoal Analysis
+
+脚本：`topomap_subgoal_analysis.py`
+
+这个脚本用于检查不同 final goal 是否在 topomap subgoal 选择阶段 collapse 到同一个局部
+subgoal。它用同一条 trajectory 作为离线 topomap，并复刻 deployment 里的局部 topomap
+选择逻辑：
+
+1. 按当前局部坐标系下的米制距离构造 directional final goals：
+   short `0-3m`，mid `3-6m`，long `6-9m`。每个 cell 不强制
+   left / forward / right 三类都存在；有哪个方向就画哪个方向。
+2. 对固定 observation 和每个 final goal，用 `dist_pred_net` 给局部 topomap window
+   中的候选 node 打分。
+3. 按 deployment 中的 closest node 和 `close_threshold` 规则选出局部 subgoal。
+4. 汇总 selected subgoal、final goal pose，以及已有 metric-distance goal-swap 日志中的
+   flow endpoint mean。
+
+每个 dataset/bucket 的单元 panel 图片会写到：
+
+```text
+test_logs_horizon/topomap_subgoal_analysis/<bucket>/flownav_baseline/<dataset>/
+```
+
+- `panel_topomap_subgoal_vs_goal_pose.png`
+- `panel_flow_endpoint_vs_topomap_subgoal.png`
+
+最终 summary 目录下的大图只是拼接已有 PNG，不重新画散点：
+
+```text
+test_logs_horizon/topomap_subgoal_analysis/flownav_baseline/summary/
+```
+
+- `fig_topomap_subgoal_vs_goal_pose.png`
+  - dataset x metric-distance bucket 拼图。
+  - 每个 cell 左边是 selected subgoal 分布，右边是 final goal-pose 分布。
+  - left / forward / right 用不同颜色；某个方向存在时才画该方向及其协方差圈。
+
+- `fig_flow_endpoint_vs_topomap_subgoal.png`
+  - dataset x metric-distance bucket 拼图。
+  - 每个 cell 左边是 flow endpoint mean 分布，右边是 selected subgoal 分布。
+  - flow endpoint panel 需要 `--swap-log-root` 下已经存在对应 metric-distance
+    goal-swap 日志。
+
+- `fig_flow_endpoint_vs_goal_pose.png`
+  - dataset x metric-distance bucket 拼图。
+  - 每个 cell 直接使用对应已有 `goal_swap_global_endpoints_*.png`，展示 flow
+    endpoint distribution 和 matched goal position distribution，不重新画点。
+
+- `fig_endpoint_mmd_emd_by_goal_distance.png`
+  - short / mid / long bucket 上的折线图。
+  - 左图是 mean endpoint RBF-MMD，右图是 mean endpoint sliced Wasserstein。
+  - 这张图直接读取已有 horizon goal-swap summary。
+
+- `fig_final_goal_dist_pred_error_by_goal_distance.png`
+  - short / mid / long bucket 上的折线图。
+  - 比较 final goal image 的 mean `dist_pred` 和真实局部 goal distance mean，
+    并画出二者均值差。
+  - 这张图需要重新运行 `topomap_subgoal_analysis.py`，因为
+    `final_goal_dist_pred` 是在 topomap/dist-head 推理时记录的。
+
+在 metric-distance goal-swap 日志生成后运行：
+
+```bash
+python3 test_scripts/topomap_subgoal_analysis.py \
+  --output-dir test_logs_horizon \
+  --swap-log-root test_logs_horizon \
+  --scan-batches 200 \
+  --batch-size 64 \
+  --angle-threshold-deg 10
+```
+
+如果只想从已有 PNG 重新拼接三张 summary 大图，不加载模型、不重跑推理：
+
+```bash
+python3 test_scripts/topomap_subgoal_analysis.py \
+  --output-dir test_logs_horizon \
+  --swap-log-root test_logs_horizon \
+  --montage-only
+```
+
+## Summary Figure Generation
 
 脚本：`generate_summary_figures.py`
 

@@ -37,6 +37,34 @@ SELECTION_VARIANTS = {
 }
 
 
+def use_metric_goal_pos(args) -> bool:
+    return args.min_goal_pos_dist is not None or args.max_goal_pos_dist is not None
+
+
+def is_horizon_filtered_run(args) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.min_goal_offset,
+            args.max_goal_offset,
+            args.min_goal_pos_dist,
+            args.max_goal_pos_dist,
+        )
+    )
+
+
+def candidate_goal_pos_for_plot(candidate, metric_goal_pos: bool = False):
+    if metric_goal_pos:
+        return np.asarray(
+            candidate.get("goal_pos_metric", candidate["goal_pos"])[:2],
+            dtype=np.float32,
+        )
+    return np.asarray(
+        candidate["goal_pos"][:2],
+        dtype=np.float32,
+    )
+
+
 def value_tag(value: float) -> str:
     return f"{value:g}".replace("-", "neg").replace(".", "p")
 
@@ -51,6 +79,25 @@ def swap_run_tag(angle_threshold_deg: float, mmd_threshold: float, emd_threshold
 
 def heading_filter_tag(enabled: bool) -> str:
     return "heading_filter" if enabled else "no_heading_filter"
+
+
+def selected_heading_filter_values(mode: str) -> list[bool]:
+    if mode == "both":
+        return [True, False]
+    if mode == "heading_filter":
+        return [True]
+    if mode == "no_heading_filter":
+        return [False]
+    raise ValueError(f"Unsupported heading filter mode: {mode}")
+
+
+def available_directions_from_candidates(directional_set) -> tuple[str, ...]:
+    return tuple(name for name in DIRECTIONS if name in directional_set["candidates"])
+
+
+def available_pairs(direction_names) -> list[tuple[str, str]]:
+    available = set(direction_names)
+    return [(first, second) for first, second in PAIRS if first in available and second in available]
 
 
 def angle_diff_deg(first: float, second: float) -> float:
@@ -167,7 +214,7 @@ def discrete_frechet_distance(traj_a: np.ndarray, traj_b: np.ndarray) -> float:
 
 def sample_directional_trajectories(model, config, device, directional_set, num_samples):
     trajectories = {}
-    for name in DIRECTIONS:
+    for name in available_directions_from_candidates(directional_set):
         candidate = directional_set["candidates"][name]
         outputs = run_model(
             model,
@@ -238,15 +285,30 @@ def apply_trajectory_selection(trajectories, args):
     raise ValueError(f"Unsupported trajectory selection: {args.trajectory_selection}")
 
 
-def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_deg, eps):
-    endpoints = {name: trajectories[name][:, -1] for name in DIRECTIONS}
-    endpoint_means = {name: endpoints[name].mean(axis=0) for name in DIRECTIONS}
-    mean_trajs = {name: trajectories[name].mean(axis=0) for name in DIRECTIONS}
+def compute_sensitivity_metrics(
+    trajectories,
+    directional_set,
+    angle_threshold_deg,
+    eps,
+    metric_goal_pos: bool = False,
+):
+    direction_names = tuple(name for name in DIRECTIONS if name in trajectories)
+    pair_names = available_pairs(direction_names)
+    endpoints = {name: trajectories[name][:, -1] for name in direction_names}
+    endpoint_means = {name: endpoints[name].mean(axis=0) for name in direction_names}
+    goal_pos_by_direction = {
+        name: candidate_goal_pos_for_plot(
+            directional_set["candidates"][name],
+            metric_goal_pos=metric_goal_pos,
+        )
+        for name in direction_names
+    }
+    mean_trajs = {name: trajectories[name].mean(axis=0) for name in direction_names}
     final_headings = {
         name: np.rad2deg(
             np.arctan2(trajectories[name][:, -1, 1], trajectories[name][:, -1, 0])
         )
-        for name in DIRECTIONS
+        for name in direction_names
     }
     mean_headings = {
         name: float(
@@ -257,21 +319,29 @@ def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_d
                 )
             )
         )
-        for name in DIRECTIONS
+        for name in direction_names
     }
     class_probs = {}
-    for name in DIRECTIONS:
+    for name in direction_names:
         labels = [classify_angle(angle, angle_threshold_deg) for angle in final_headings[name]]
         class_probs[name] = {label: labels.count(label) / len(labels) for label in DIRECTIONS}
 
     pair_metrics = {}
-    for first, second in PAIRS:
+    for first, second in pair_names:
         key = f"{first}_{second}"
-        goal_a = directional_set["candidates"][first]["goal_pos"][:2]
-        goal_b = directional_set["candidates"][second]["goal_pos"][:2]
+        goal_a = goal_pos_by_direction[first]
+        goal_b = goal_pos_by_direction[second]
         goal_dist = float(np.linalg.norm(goal_a - goal_b))
         endpoint_mean_dist = float(
             np.linalg.norm(endpoint_means[first] - endpoint_means[second])
+        )
+        endpoint_delta = endpoint_means[second] - endpoint_means[first]
+        goal_delta = goal_b - goal_a
+        endpoint_delta_norm = float(np.linalg.norm(endpoint_delta))
+        goal_delta_norm = float(np.linalg.norm(goal_delta))
+        goal_direction_alignment = float(
+            np.dot(endpoint_delta, goal_delta)
+            / max(endpoint_delta_norm * goal_delta_norm, eps)
         )
         paired_count = min(len(endpoints[first]), len(endpoints[second]))
         endpoint_displacement = float(
@@ -288,6 +358,7 @@ def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_d
             "endpoint_mean_distance": endpoint_mean_dist,
             "goal_pos_distance": goal_dist,
             "s_goal": endpoint_mean_dist / max(goal_dist, eps),
+            "flow_goal_direction_alignment": goal_direction_alignment,
             "endpoint_displacement_difference": endpoint_displacement,
             "heading_diff_deg": angle_diff_deg(mean_headings[first], mean_headings[second]),
             "class_tv_distance": float(tv_distance),
@@ -307,6 +378,7 @@ def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_d
     aggregate_keys = [
         "endpoint_mean_distance",
         "s_goal",
+        "flow_goal_direction_alignment",
         "endpoint_displacement_difference",
         "heading_diff_deg",
         "class_tv_distance",
@@ -316,21 +388,35 @@ def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_d
         "mean_traj_dtw",
         "mean_traj_frechet",
     ]
-    aggregate = {
-        f"mean_{key}": float(np.mean([pair_metrics[pair][key] for pair in pair_metrics]))
-        for key in aggregate_keys
-    }
-    aggregate.update(
-        {
-            f"min_{key}": float(np.min([pair_metrics[pair][key] for pair in pair_metrics]))
+    if pair_metrics:
+        aggregate = {
+            f"mean_{key}": float(np.mean([pair_metrics[pair][key] for pair in pair_metrics]))
             for key in aggregate_keys
         }
-    )
+        aggregate.update(
+            {
+                f"min_{key}": float(
+                    np.min([pair_metrics[pair][key] for pair in pair_metrics])
+                )
+                for key in aggregate_keys
+            }
+        )
+    else:
+        aggregate = {f"mean_{key}": None for key in aggregate_keys}
+        aggregate.update({f"min_{key}": None for key in aggregate_keys})
 
     return {
         "endpoint_means": {
-            name: endpoint_means[name].astype(float).tolist() for name in DIRECTIONS
+            name: endpoint_means[name].astype(float).tolist() for name in direction_names
         },
+        "goal_pos_by_direction": {
+            name: goal_pos_by_direction[name].astype(float).tolist()
+            for name in direction_names
+        },
+        "available_directions": list(direction_names),
+        "available_pairs": list(pair_metrics.keys()),
+        "flow_endpoint_pair_distance": aggregate["mean_endpoint_mean_distance"],
+        "flow_goal_direction_alignment": aggregate["mean_flow_goal_direction_alignment"],
         "mean_headings_deg": mean_headings,
         "class_probs": class_probs,
         "pairs": pair_metrics,
@@ -339,6 +425,8 @@ def compute_sensitivity_metrics(trajectories, directional_set, angle_threshold_d
 
 
 def is_anomaly(metrics, args) -> bool:
+    if metrics.get("mean_endpoint_rbf_mmd") is None:
+        return False
     return (
         metrics["mean_endpoint_rbf_mmd"] <= args.anomaly_mmd_threshold
         or metrics["mean_endpoint_sliced_wasserstein"] <= args.anomaly_emd_threshold
@@ -378,11 +466,13 @@ def plot_covariance_circle(
     ax.scatter([mean[0]], [mean[1]], c=color, marker="x", s=90, linewidths=2.0)
 
 
-def endpoint_pairwise_distribution_metrics(all_endpoints):
+def endpoint_pairwise_distribution_metrics(all_endpoints, max_points_per_class: int | None = None):
     pair_metrics = {}
     for first, second in PAIRS:
-        points_a = np.asarray(all_endpoints[first], dtype=np.float32)
-        points_b = np.asarray(all_endpoints[second], dtype=np.float32)
+        raw_points_a = np.asarray(all_endpoints[first], dtype=np.float32)
+        raw_points_b = np.asarray(all_endpoints[second], dtype=np.float32)
+        points_a = downsample_points(raw_points_a, max_points_per_class)
+        points_b = downsample_points(raw_points_b, max_points_per_class)
         key = f"{first}_{second}"
         if len(points_a) and len(points_b):
             pair_metrics[key] = {
@@ -390,15 +480,19 @@ def endpoint_pairwise_distribution_metrics(all_endpoints):
                 "endpoint_sliced_wasserstein": sliced_wasserstein_distance(
                     points_a, points_b
                 ),
-                "first_count": int(len(points_a)),
-                "second_count": int(len(points_b)),
+                "first_count": int(len(raw_points_a)),
+                "second_count": int(len(raw_points_b)),
+                "first_metric_count": int(len(points_a)),
+                "second_metric_count": int(len(points_b)),
             }
         else:
             pair_metrics[key] = {
                 "endpoint_rbf_mmd": None,
                 "endpoint_sliced_wasserstein": None,
-                "first_count": int(len(points_a)),
-                "second_count": int(len(points_b)),
+                "first_count": int(len(raw_points_a)),
+                "second_count": int(len(raw_points_b)),
+                "first_metric_count": int(len(points_a)),
+                "second_metric_count": int(len(points_b)),
             }
     return pair_metrics
 
@@ -471,7 +565,13 @@ def downsample_points(points: np.ndarray, max_points: int | None) -> np.ndarray:
     return points[indices]
 
 
-def plot_endpoint_distribution(trajectories, directional_set, metrics, output_path):
+def plot_endpoint_distribution(
+    trajectories,
+    directional_set,
+    metrics,
+    output_path,
+    metric_goal_pos: bool = False,
+):
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
     ax.scatter([0.0], [0.0], c="black", s=50, label="robot")
     ax.quiver(
@@ -486,9 +586,12 @@ def plot_endpoint_distribution(trajectories, directional_set, metrics, output_pa
         width=0.006,
     )
 
-    for name in DIRECTIONS:
+    for name in tuple(name for name in DIRECTIONS if name in trajectories):
         endpoints = trajectories[name][:, -1]
-        goal_pos = directional_set["candidates"][name]["goal_pos"][:2]
+        goal_pos = candidate_goal_pos_for_plot(
+            directional_set["candidates"][name],
+            metric_goal_pos=metric_goal_pos,
+        )
         color = COLORS[name]
         ax.scatter(
             endpoints[:, 0],
@@ -549,9 +652,16 @@ def plot_global_endpoint_distribution(
     all_goals,
     output_path,
     max_points_per_class: int | None = None,
+    max_metric_points_per_class: int | None = None,
 ):
-    endpoint_pair_metrics = endpoint_pairwise_distribution_metrics(all_endpoints)
-    goal_pair_metrics = endpoint_pairwise_distribution_metrics(all_goals)
+    endpoint_pair_metrics = endpoint_pairwise_distribution_metrics(
+        all_endpoints,
+        max_points_per_class=max_metric_points_per_class,
+    )
+    goal_pair_metrics = endpoint_pairwise_distribution_metrics(
+        all_goals,
+        max_points_per_class=max_metric_points_per_class,
+    )
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 7.0))
     scatter_distribution_panel(
         axes[0],
@@ -600,6 +710,7 @@ def plot_heading_filter_comparison(
     results_by_tag,
     output_path,
     max_points_per_class: int | None = None,
+    max_metric_points_per_class: int | None = None,
 ):
     filtered = results_by_tag["heading_filter"]["all_endpoints"]
     unfiltered = results_by_tag["no_heading_filter"]["all_endpoints"]
@@ -657,9 +768,20 @@ def plot_heading_filter_comparison(
                 fill_alpha=0.015,
             )
 
-        if len(filtered_points) and len(unfiltered_points):
-            mmd = rbf_mmd(filtered_points, unfiltered_points)
-            emd = sliced_wasserstein_distance(filtered_points, unfiltered_points)
+        filtered_metric_points = downsample_points(
+            filtered_points,
+            max_metric_points_per_class,
+        )
+        unfiltered_metric_points = downsample_points(
+            unfiltered_points,
+            max_metric_points_per_class,
+        )
+        if len(filtered_metric_points) and len(unfiltered_metric_points):
+            mmd = rbf_mmd(filtered_metric_points, unfiltered_metric_points)
+            emd = sliced_wasserstein_distance(
+                filtered_metric_points,
+                unfiltered_metric_points,
+            )
         else:
             mmd = None
             emd = None
@@ -668,6 +790,8 @@ def plot_heading_filter_comparison(
             "endpoint_sliced_wasserstein": emd,
             "heading_filter_count": int(len(filtered_points)),
             "no_heading_filter_count": int(len(unfiltered_points)),
+            "heading_filter_metric_count": int(len(filtered_metric_points)),
+            "no_heading_filter_metric_count": int(len(unfiltered_metric_points)),
         }
 
         metric_text = (
@@ -702,20 +826,68 @@ def plot_sensitivity_overview(rows, output_path):
     if not rows:
         return
     indices = np.arange(len(rows))
-    endpoint = np.array([row["mean_endpoint_mean_distance"] for row in rows])
-    s_goal = np.array([row["mean_s_goal"] for row in rows])
-    mmd = np.array([row["mean_endpoint_rbf_mmd"] for row in rows])
-    emd = np.array([row["mean_endpoint_sliced_wasserstein"] for row in rows])
+    endpoint = np.array(
+        [
+            np.nan if row["mean_endpoint_mean_distance"] is None else row["mean_endpoint_mean_distance"]
+            for row in rows
+        ],
+        dtype=float,
+    )
+    mmd = np.array(
+        [
+            np.nan if row["mean_endpoint_rbf_mmd"] is None else row["mean_endpoint_rbf_mmd"]
+            for row in rows
+        ],
+        dtype=float,
+    )
+    emd = np.array(
+        [
+            np.nan
+            if row["mean_endpoint_sliced_wasserstein"] is None
+            else row["mean_endpoint_sliced_wasserstein"]
+            for row in rows
+        ],
+        dtype=float,
+    )
     anomaly = np.array([row["is_anomaly"] for row in rows], dtype=bool)
+    valid = {
+        "endpoint": np.isfinite(endpoint),
+        "mmd": np.isfinite(mmd),
+        "emd": np.isfinite(emd),
+    }
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
-    for ax, values, title, ylabel in [
-        (axes[0], endpoint, "Endpoint Mean Separation", "mean endpoint distance"),
-        (axes[1], mmd, "Endpoint Distribution MMD", "mean RBF-MMD"),
-        (axes[2], emd, "Endpoint Distribution EMD Approx.", "mean sliced Wasserstein"),
+    for ax, values, mask, title, ylabel in [
+        (
+            axes[0],
+            endpoint,
+            valid["endpoint"],
+            "Endpoint Mean Separation",
+            "mean endpoint distance",
+        ),
+        (axes[1], mmd, valid["mmd"], "Endpoint Distribution MMD", "mean RBF-MMD"),
+        (
+            axes[2],
+            emd,
+            valid["emd"],
+            "Endpoint Distribution EMD Approx.",
+            "mean sliced Wasserstein",
+        ),
     ]:
-        ax.scatter(indices[~anomaly], values[~anomaly], c="steelblue", s=14, label="normal")
-        ax.scatter(indices[anomaly], values[anomaly], c="crimson", s=20, label="anomaly")
+        normal = mask & ~anomaly
+        anomalous = mask & anomaly
+        ax.scatter(indices[normal], values[normal], c="steelblue", s=14, label="normal")
+        ax.scatter(indices[anomalous], values[anomalous], c="crimson", s=20, label="anomaly")
+        missing = ~mask
+        if np.any(missing):
+            ax.scatter(
+                indices[missing],
+                np.zeros_like(indices[missing], dtype=float),
+                c="gray",
+                s=12,
+                marker="x",
+                label="no pair",
+            )
         ax.set_title(title)
         ax.set_xlabel("matched sample index")
         ax.set_ylabel(ylabel)
@@ -740,12 +912,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--angle-threshold-deg", type=float, default=25.0)
     parser.add_argument("--min-goal-offset", type=int, default=None)
     parser.add_argument("--max-goal-offset", type=int, default=None)
+    parser.add_argument("--min-goal-pos-dist", type=float, default=None)
+    parser.add_argument("--max-goal-pos-dist", type=float, default=None)
     parser.add_argument("--max-direction-angle-deg", type=float, default=90.0)
     parser.add_argument("--max-endpoint-goal-dist", type=float, default=None)
     parser.add_argument("--max-visualizations", type=int, default=None)
+    parser.add_argument(
+        "--skip-anomaly-stage",
+        action="store_true",
+        help=(
+            "Skip the anomaly_samples stage. Horizon-filtered runs also skip "
+            "this stage automatically."
+        ),
+    )
     parser.add_argument("--anomaly-mmd-threshold", type=float, default=0.12)
     parser.add_argument("--anomaly-emd-threshold", type=float, default=0.45)
     parser.add_argument("--global-endpoint-max-points-per-class", type=int, default=10000)
+    parser.add_argument(
+        "--global-metric-max-points-per-class",
+        type=int,
+        default=5000,
+        help=(
+            "Maximum points per direction used for global pairwise MMD/EMD. "
+            "This avoids O(N^2) memory blowups; set <=0 to use all points."
+        ),
+    )
+    parser.add_argument(
+        "--heading-filter-mode",
+        choices=("both", "heading_filter", "no_heading_filter"),
+        default="both",
+        help=(
+            "Which goal-heading filter setting to evaluate. `both` preserves the "
+            "previous behavior and also writes the heading-filter comparison."
+        ),
+    )
     parser.add_argument(
         "--trajectory-selection",
         choices=sorted(SELECTION_VARIANTS.keys()),
@@ -773,11 +973,14 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    skip_anomaly_stage = args.skip_anomaly_stage or is_horizon_filtered_run(args)
 
     log(
         "Starting goal_swap_visualization "
         f"dataset={args.dataset} split={args.split} scan_batches={args.scan_batches} "
-        f"batch_size={args.batch_size} num_samples={args.num_samples}"
+        f"batch_size={args.batch_size} num_samples={args.num_samples} "
+        f"heading_filter_mode={args.heading_filter_mode} "
+        f"skip_anomaly_stage={skip_anomaly_stage}"
     )
     log(f"Loading config: {args.config}")
     config = load_config(args.config)
@@ -813,23 +1016,35 @@ def main() -> None:
         ),
     )
     log(f"Writing outputs under: {parent_output_dir}")
+    require_all_directions = not is_horizon_filtered_run(args)
 
     def run_stage(filter_goal_heading: bool, stage_name: str, save_anomalies: bool):
         tag = heading_filter_tag(filter_goal_heading)
         output_dir = ensure_output_dir(parent_output_dir, stage_name, tag)
         log(f"Running stage={stage_name}, setting={tag}")
-        directional_sets = find_all_matched_directional_goal_sets(
-            dataset=dataloader.dataset,
-            transform=transform,
-            device=device,
-            angle_threshold_deg=args.angle_threshold_deg,
-            scan_items=args.scan_batches * args.batch_size,
-            min_goal_offset=args.min_goal_offset,
-            max_goal_offset=args.max_goal_offset,
-            max_direction_angle_deg=args.max_direction_angle_deg,
-            max_endpoint_goal_dist=args.max_endpoint_goal_dist,
-            filter_goal_heading=filter_goal_heading,
-        )
+        scan_error = None
+        try:
+            directional_sets = find_all_matched_directional_goal_sets(
+                dataset=dataloader.dataset,
+                transform=transform,
+                device=device,
+                angle_threshold_deg=args.angle_threshold_deg,
+                scan_items=args.scan_batches * args.batch_size,
+                min_goal_offset=args.min_goal_offset,
+                max_goal_offset=args.max_goal_offset,
+                min_goal_pos_dist=args.min_goal_pos_dist,
+                max_goal_pos_dist=args.max_goal_pos_dist,
+                max_direction_angle_deg=args.max_direction_angle_deg,
+                max_endpoint_goal_dist=args.max_endpoint_goal_dist,
+                filter_goal_heading=filter_goal_heading,
+                require_all_directions=require_all_directions,
+            )
+        except RuntimeError as exc:
+            if not is_horizon_filtered_run(args):
+                raise
+            scan_error = str(exc)
+            log(f"[{stage_name}/{tag}] No matched directional goals: {scan_error}")
+            directional_sets = []
         if args.max_visualizations is not None:
             directional_sets = directional_sets[: args.max_visualizations]
 
@@ -849,18 +1064,27 @@ def main() -> None:
             "scan_batches": args.scan_batches,
             "scan_items": args.scan_batches * args.batch_size,
             "num_matched_sets": len(directional_sets),
+            "scan_error": scan_error,
             "goal_matching": "same_trajectory_same_curr_time",
             "direction_source": "goal_pos",
+            "require_all_directions": require_all_directions,
             "min_goal_offset": args.min_goal_offset,
             "max_goal_offset": args.max_goal_offset,
+            "min_goal_pos_dist": args.min_goal_pos_dist,
+            "max_goal_pos_dist": args.max_goal_pos_dist,
             "max_direction_angle_deg": args.max_direction_angle_deg,
             "max_endpoint_goal_dist": args.max_endpoint_goal_dist,
             "filter_goal_heading": filter_goal_heading,
             "anomaly_mmd_threshold": args.anomaly_mmd_threshold,
             "anomaly_emd_threshold": args.anomaly_emd_threshold,
+            "skip_anomaly_stage": skip_anomaly_stage,
+            "horizon_filtered_run": is_horizon_filtered_run(args),
             "save_anomaly_visualizations": save_anomalies,
             "global_endpoint_max_points_per_class": (
                 args.global_endpoint_max_points_per_class
+            ),
+            "global_metric_max_points_per_class": (
+                args.global_metric_max_points_per_class
             ),
             "items": [],
         }
@@ -873,11 +1097,13 @@ def main() -> None:
         anomaly_goals = {name: [] for name in DIRECTIONS}
         for item_idx, directional_set in enumerate(directional_sets):
             source = directional_set["base_source"]
+            direction_names = available_directions_from_candidates(directional_set)
             log(
                 f"[{stage_name}/{tag}] Evaluating sensitivity "
                 f"{item_idx + 1}/{len(directional_sets)}: "
                 f"dataset_index={source['dataset_index']}, "
-                f"trajectory={source['trajectory']}, curr_time={source['curr_time']}"
+                f"trajectory={source['trajectory']}, curr_time={source['curr_time']}, "
+                f"directions={','.join(direction_names)}"
             )
             trajectories = sample_directional_trajectories(
                 model=model,
@@ -895,16 +1121,17 @@ def main() -> None:
                 directional_set=directional_set,
                 angle_threshold_deg=args.angle_threshold_deg,
                 eps=args.kl_eps,
+                metric_goal_pos=use_metric_goal_pos(args),
             )
-            for name in DIRECTIONS:
+            for name in direction_names:
                 all_endpoints[name].extend(
                     metric_trajectories[name][:, -1].astype(float).tolist()
                 )
                 all_goals[name].append(
-                    np.asarray(
-                        directional_set["candidates"][name]["goal_pos"][:2],
-                        dtype=float,
-                    ).tolist()
+                    candidate_goal_pos_for_plot(
+                        directional_set["candidates"][name],
+                        metric_goal_pos=use_metric_goal_pos(args),
+                    ).astype(float).tolist()
                 )
             anomalous = is_anomaly(metrics, args)
             row = {
@@ -912,13 +1139,20 @@ def main() -> None:
                 "dataset_index": source["dataset_index"],
                 "trajectory": source["trajectory"],
                 "curr_time": source["curr_time"],
+                "available_directions": metrics["available_directions"],
+                "available_pairs": metrics["available_pairs"],
+                "num_available_directions": len(metrics["available_directions"]),
+                "num_available_pairs": len(metrics["available_pairs"]),
                 "is_anomaly": anomalous if save_anomalies else False,
                 "would_be_anomaly": anomalous,
                 **{
                     key: value
                     for key, value in metrics.items()
-                    if isinstance(value, (float, int, bool))
+                    if value is None or isinstance(value, (float, int, bool))
                 },
+                "endpoint_means": metrics["endpoint_means"],
+                "goal_pos_by_direction": metrics["goal_pos_by_direction"],
+                "pair_metrics": metrics["pairs"],
                 "trajectory_selection": args.trajectory_selection,
                 "cluster_threshold": (
                     args.cluster_threshold
@@ -932,15 +1166,15 @@ def main() -> None:
                 anomaly_sets.append(
                     (item_idx, directional_set, metrics, metric_trajectories, selection_info)
                 )
-                for name in DIRECTIONS:
+                for name in direction_names:
                     anomaly_endpoints[name].extend(
                         metric_trajectories[name][:, -1].astype(float).tolist()
                     )
                     anomaly_goals[name].append(
-                        np.asarray(
-                            directional_set["candidates"][name]["goal_pos"][:2],
-                            dtype=float,
-                        ).tolist()
+                        candidate_goal_pos_for_plot(
+                            directional_set["candidates"][name],
+                            metric_goal_pos=use_metric_goal_pos(args),
+                        ).astype(float).tolist()
                     )
 
         anomaly_txt_path = None
@@ -957,8 +1191,12 @@ def main() -> None:
                         f"mean_emd={metrics['mean_endpoint_sliced_wasserstein']:.6f}\n"
                     )
 
-        overview_path = output_dir / timestamp_name("goal_swap_sensitivity_overview", "png")
-        plot_sensitivity_overview(metric_rows, overview_path)
+        overview_path = None
+        if metric_rows:
+            overview_path = output_dir / timestamp_name(
+                "goal_swap_sensitivity_overview", "png"
+            )
+            plot_sensitivity_overview(metric_rows, overview_path)
         global_endpoint_path = output_dir / timestamp_name(
             "goal_swap_global_endpoints", "png"
         )
@@ -967,6 +1205,7 @@ def main() -> None:
             all_goals,
             global_endpoint_path,
             max_points_per_class=args.global_endpoint_max_points_per_class,
+            max_metric_points_per_class=args.global_metric_max_points_per_class,
         )
 
         if save_anomalies:
@@ -978,6 +1217,7 @@ def main() -> None:
                 anomaly_goals,
                 anomaly_global_endpoint_path,
                 max_points_per_class=args.global_endpoint_max_points_per_class,
+                max_metric_points_per_class=args.global_metric_max_points_per_class,
             )
         else:
             anomaly_global_endpoint_path = None
@@ -1021,6 +1261,7 @@ def main() -> None:
                 directional_set=directional_set,
                 metrics=metrics,
                 output_path=endpoint_png_path,
+                metric_goal_pos=use_metric_goal_pos(args),
             )
             metadata.update(
                 {
@@ -1034,6 +1275,9 @@ def main() -> None:
                     "direction_source": "goal_pos",
                     "min_goal_offset": args.min_goal_offset,
                     "max_goal_offset": args.max_goal_offset,
+                    "min_goal_pos_dist": args.min_goal_pos_dist,
+                    "max_goal_pos_dist": args.max_goal_pos_dist,
+                    "require_all_directions": require_all_directions,
                     "max_direction_angle_deg": args.max_direction_angle_deg,
                     "max_endpoint_goal_dist": args.max_endpoint_goal_dist,
                     "filter_goal_heading": filter_goal_heading,
@@ -1048,7 +1292,7 @@ def main() -> None:
                     "anomaly_metrics": metrics,
                     "sampled_endpoints": {
                         name: trajectories[name][:, -1].astype(float).tolist()
-                        for name in DIRECTIONS
+                        for name in trajectories
                     },
                     "png_path": str(png_path),
                     "endpoint_png_path": str(endpoint_png_path),
@@ -1061,6 +1305,8 @@ def main() -> None:
                     "dataset_index": source["dataset_index"],
                     "trajectory": source["trajectory"],
                     "curr_time": source["curr_time"],
+                    "available_directions": metrics["available_directions"],
+                    "available_pairs": metrics["available_pairs"],
                     "is_anomaly": True,
                     "mean_endpoint_mean_distance": metrics["mean_endpoint_mean_distance"],
                     "mean_s_goal": metrics["mean_s_goal"],
@@ -1077,7 +1323,7 @@ def main() -> None:
 
         summary["num_anomalies"] = len(anomaly_sets)
         summary["anomaly_txt_path"] = str(anomaly_txt_path) if anomaly_txt_path else None
-        summary["overview_path"] = str(overview_path)
+        summary["overview_path"] = str(overview_path) if overview_path else None
         summary["global_endpoint_path"] = str(global_endpoint_path)
         summary["global_endpoint_pair_metrics"] = global_pair_metrics
         summary["anomaly_global_endpoint_path"] = (
@@ -1110,12 +1356,17 @@ def main() -> None:
         return result
 
     stage_results = {}
-    for stage_name, save_anomalies in [
-        ("all_samples", False),
-        ("anomaly_samples", True),
-    ]:
+    stages = [("all_samples", False)]
+    if skip_anomaly_stage:
+        log("Skipping anomaly_samples stage for this run.")
+    else:
+        stages.append(("anomaly_samples", True))
+
+    for stage_name, save_anomalies in stages:
         results_by_tag = {}
-        for filter_goal_heading in [True, False]:
+        for filter_goal_heading in selected_heading_filter_values(
+            args.heading_filter_mode
+        ):
             result = run_stage(
                 filter_goal_heading=filter_goal_heading,
                 stage_name=stage_name,
@@ -1125,6 +1376,13 @@ def main() -> None:
         stage_results[stage_name] = results_by_tag
 
     all_sample_results = stage_results["all_samples"]
+    if set(all_sample_results) != {"heading_filter", "no_heading_filter"}:
+        log(
+            "Skipping heading-filter comparison because only "
+            f"{', '.join(sorted(all_sample_results))} was run."
+        )
+        return
+
     comparison_path = parent_output_dir / timestamp_name(
         "goal_swap_all_samples_heading_filter_endpoint_comparison", "png"
     )
@@ -1132,6 +1390,7 @@ def main() -> None:
         all_sample_results,
         comparison_path,
         max_points_per_class=args.global_endpoint_max_points_per_class,
+        max_metric_points_per_class=args.global_metric_max_points_per_class,
     )
     comparison_summary_path = parent_output_dir / timestamp_name(
         "goal_swap_all_samples_heading_filter_comparison", "json"
@@ -1155,6 +1414,9 @@ def main() -> None:
             "anomaly_emd_threshold": args.anomaly_emd_threshold,
             "global_endpoint_max_points_per_class": (
                 args.global_endpoint_max_points_per_class
+            ),
+            "global_metric_max_points_per_class": (
+                args.global_metric_max_points_per_class
             ),
             "comparison": comparison,
             "settings": {

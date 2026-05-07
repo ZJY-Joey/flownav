@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--angle-threshold-deg", type=float, default=25.0)
     parser.add_argument("--min-goal-offset", type=int, default=None)
     parser.add_argument("--max-goal-offset", type=int, default=None)
+    parser.add_argument("--min-goal-pos-dist", type=float, default=None)
+    parser.add_argument("--max-goal-pos-dist", type=float, default=None)
     parser.add_argument("--max-direction-angle-deg", type=float, default=90.0)
     parser.add_argument("--max-endpoint-goal-dist", type=float, default=None)
     parser.add_argument("--max-visualizations", type=int, default=None)
@@ -424,6 +426,8 @@ def main() -> None:
         scan_items=args.scan_batches * args.batch_size,
         min_goal_offset=args.min_goal_offset,
         max_goal_offset=args.max_goal_offset,
+        min_goal_pos_dist=args.min_goal_pos_dist,
+        max_goal_pos_dist=args.max_goal_pos_dist,
         max_direction_angle_deg=args.max_direction_angle_deg,
         max_endpoint_goal_dist=args.max_endpoint_goal_dist,
         filter_goal_heading=False,
@@ -577,6 +581,8 @@ def main() -> None:
         "filter_goal_heading": False,
         "min_goal_offset": args.min_goal_offset,
         "max_goal_offset": args.max_goal_offset,
+        "min_goal_pos_dist": args.min_goal_pos_dist,
+        "max_goal_pos_dist": args.max_goal_pos_dist,
         "max_direction_angle_deg": args.max_direction_angle_deg,
         "max_endpoint_goal_dist": args.max_endpoint_goal_dist,
         "global_goal_vs_masked_metrics": global_shift_metrics(all_endpoints),

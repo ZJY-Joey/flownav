@@ -20,7 +20,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from flownav.data.vint_dataset import ViNT_Dataset
-from flownav.data.data_utils import calculate_sin_cos, yaw_rotmat
+from flownav.data.data_utils import (
+    calculate_sin_cos,
+    get_data_path,
+    img_path_to_data,
+    to_local_coords,
+    yaw_rotmat,
+)
 from flownav.models.nomad import DenseNetwork, NoMaD
 from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
 from flownav.training.utils import model_output
@@ -198,6 +204,24 @@ def run_model(
         )
 
 
+def run_dist_pred(
+    model: NoMaD,
+    batch_obs_images: torch.Tensor,
+    batch_goal_images: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    with torch.no_grad():
+        no_mask = torch.zeros((batch_goal_images.shape[0],)).long().to(device)
+        obsgoal_cond = model(
+            "vision_encoder",
+            obs_img=batch_obs_images,
+            goal_img=batch_goal_images,
+            input_goal_mask=no_mask,
+        )
+        obsgoal_cond = obsgoal_cond.flatten(start_dim=1)
+        return model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+
+
 def select_prediction(
     gc_actions: torch.Tensor, batch_size: int, selection: str
 ) -> torch.Tensor:
@@ -295,6 +319,21 @@ def prepare_goal_image(
     return transform(goal_image.unsqueeze(0)).to(device)
 
 
+def safe_load_image(dataset: ViNT_Dataset, trajectory_name: str, time_index: int) -> torch.Tensor:
+    image = dataset._load_image(trajectory_name, time_index)
+    if image is not None:
+        return image
+
+    image_path = get_data_path(dataset.data_folder, trajectory_name, time_index)
+    try:
+        return img_path_to_data(image_path, dataset.image_size)
+    except Exception as exc:
+        raise FileNotFoundError(
+            "Could not load image from dataset cache or filesystem: "
+            f"{image_path}"
+        ) from exc
+
+
 def build_matched_goal_set_for_index(
     dataset: ViNT_Dataset,
     sample_index: int,
@@ -305,6 +344,8 @@ def build_matched_goal_set_for_index(
     early_waypoints: int = 3,
     min_goal_offset: Optional[int] = None,
     max_goal_offset: Optional[int] = None,
+    min_goal_pos_dist: Optional[float] = None,
+    max_goal_pos_dist: Optional[float] = None,
     max_direction_angle_deg: Optional[float] = 90.0,
     max_endpoint_goal_dist: Optional[float] = None,
     filter_goal_heading: bool = True,
@@ -320,7 +361,12 @@ def build_matched_goal_set_for_index(
             dataset.waypoint_spacing,
         )
     )
-    obs_raw = torch.cat([dataset._load_image(traj_name, t) for t in context_times])
+    try:
+        obs_raw = torch.cat(
+            [safe_load_image(dataset, traj_name, t) for t in context_times]
+        )
+    except FileNotFoundError:
+        return None
     obs = prepare_obs_image(obs_raw, transform, device)
 
     candidates_by_direction: Dict[str, list] = {
@@ -348,13 +394,23 @@ def build_matched_goal_set_for_index(
         if goal_time >= traj_len:
             continue
 
+        curr_yaw = traj_data["yaw"][curr_time]
+        curr_yaw = float(np.asarray(curr_yaw).squeeze())
+        goal_pos_metric = to_local_coords(
+            np.asarray(traj_data["position"][goal_time][:2], dtype=np.float32)[None],
+            np.asarray(traj_data["position"][curr_time][:2], dtype=np.float32),
+            curr_yaw,
+        )[0]
+        goal_pos_metric_dist = float(np.linalg.norm(goal_pos_metric[:2]))
         actions, goal_pos = dataset._compute_actions(traj_data, curr_time, goal_time)
+        if min_goal_pos_dist is not None and goal_pos_metric_dist < float(min_goal_pos_dist):
+            continue
+        if max_goal_pos_dist is not None and goal_pos_metric_dist > float(max_goal_pos_dist):
+            continue
         actions_torch = torch.as_tensor(actions.astype(np.float32), dtype=torch.float32)
         if dataset.learn_angle:
             actions_torch = calculate_sin_cos(actions_torch)
-        curr_yaw = traj_data["yaw"][curr_time]
         goal_yaw = traj_data["yaw"][goal_time]
-        curr_yaw = float(np.asarray(curr_yaw).squeeze())
         goal_yaw = float(np.asarray(goal_yaw).squeeze())
         goal_yaw_heading_rad = np.arctan2(
             np.sin(goal_yaw - curr_yaw), np.cos(goal_yaw - curr_yaw)
@@ -409,7 +465,10 @@ def build_matched_goal_set_for_index(
             name, goal_image_heading_angle_deg, angle_threshold_deg
         ):
             continue
-        goal_raw = dataset._load_image(traj_name, goal_time)
+        try:
+            goal_raw = safe_load_image(dataset, traj_name, goal_time)
+        except FileNotFoundError:
+            continue
         candidates_by_direction[name].append(
             {
                 "source": {
@@ -425,6 +484,9 @@ def build_matched_goal_set_for_index(
                 "goal": prepare_goal_image(goal_raw, transform, device),
                 "target_action": actions_torch.detach().cpu(),
                 "goal_pos": goal_pos.astype(np.float32),
+                "goal_pos_dist": goal_pos_metric_dist,
+                "goal_pos_metric": goal_pos_metric.astype(np.float32),
+                "goal_pos_metric_dist": goal_pos_metric_dist,
                 "goal_angle_deg": goal_angle_deg,
                 "goal_image_heading_angle_deg": goal_image_heading_angle_deg,
                 "goal_yaw_heading_angle_deg": goal_yaw_heading_angle_deg,
@@ -476,6 +538,8 @@ def find_matched_directional_goal_set(
     early_waypoints: int = 3,
     min_goal_offset: Optional[int] = None,
     max_goal_offset: Optional[int] = None,
+    min_goal_pos_dist: Optional[float] = None,
+    max_goal_pos_dist: Optional[float] = None,
     max_direction_angle_deg: Optional[float] = 90.0,
     max_endpoint_goal_dist: Optional[float] = None,
     filter_goal_heading: bool = True,
@@ -498,6 +562,8 @@ def find_matched_directional_goal_set(
             early_waypoints=early_waypoints,
             min_goal_offset=min_goal_offset,
             max_goal_offset=max_goal_offset,
+            min_goal_pos_dist=min_goal_pos_dist,
+            max_goal_pos_dist=max_goal_pos_dist,
             max_direction_angle_deg=max_direction_angle_deg,
             max_endpoint_goal_dist=max_endpoint_goal_dist,
             filter_goal_heading=filter_goal_heading,
@@ -530,13 +596,18 @@ def find_all_matched_directional_goal_sets(
     early_waypoints: int = 3,
     min_goal_offset: Optional[int] = None,
     max_goal_offset: Optional[int] = None,
+    min_goal_pos_dist: Optional[float] = None,
+    max_goal_pos_dist: Optional[float] = None,
     max_direction_angle_deg: Optional[float] = 90.0,
     max_endpoint_goal_dist: Optional[float] = None,
     filter_goal_heading: bool = True,
+    require_all_directions: bool = True,
 ) -> list[Dict[str, Any]]:
+    required_directions = {"left", "right", "forward"}
     log(
         "Scanning same-trajectory/same-time samples for all matched "
-        f"left/right/forward goal sets, up to {scan_items} items..."
+        f"{'left/right/forward' if require_all_directions else 'directional'} "
+        f"goal sets, up to {scan_items} items..."
     )
     goal_sets = []
     limit = min(scan_items, len(dataset))
@@ -556,20 +627,27 @@ def find_all_matched_directional_goal_sets(
             early_waypoints=early_waypoints,
             min_goal_offset=min_goal_offset,
             max_goal_offset=max_goal_offset,
+            min_goal_pos_dist=min_goal_pos_dist,
+            max_goal_pos_dist=max_goal_pos_dist,
             max_direction_angle_deg=max_direction_angle_deg,
             max_endpoint_goal_dist=max_endpoint_goal_dist,
             filter_goal_heading=filter_goal_heading,
         )
         if goal_set is None:
             continue
-        if {"left", "right", "forward"} <= set(goal_set["candidates"]):
+        if (
+            required_directions <= set(goal_set["candidates"])
+            if require_all_directions
+            else bool(goal_set["candidates"])
+        ):
             goal_sets.append(goal_set)
 
     if not goal_sets:
+        target = "left/right/forward matched" if require_all_directions else "directional"
         raise RuntimeError(
             "Could not find any same-trajectory/same-time samples with "
-            "left/right/forward matched goals. Try increasing --scan-batches "
-            "or lowering --angle-threshold-deg."
+            f"{target} goals. Try increasing --scan-batches or lowering "
+            "--angle-threshold-deg."
         )
     return goal_sets
 

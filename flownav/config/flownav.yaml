@@ -107,13 +107,31 @@ datasets:
   #   negative_mining: True
   #   waypoint_spacing: 1
   sacson:
-    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson/
-    train: /media/zjy/Elements SE/11111/UED_FLOW/sacson/train/
-    test: /media/zjy/Elements SE/11111/UED_FLOW/sacson/test/
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/
+    train: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/test/
     end_slack: 3 # because many trajectories end in collisions
     goals_per_obs: 1
     negative_mining: True
     waypoint_spacing: 1
+  # sacson:
+  #   data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson/
+  #   train: /media/zjy/Elements SE/11111/UED_FLOW/sacson/train/
+  #   test: /media/zjy/Elements SE/11111/UED_FLOW/sacson/test/
+  #   end_slack: 3 # because many trajectories end in collisions
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  #   waypoint_spacing: 1  
+
+  # scand:
+  #   data_folder: /media/zjy/Elements SE/11111/UED_FLOW/scand/
+  #   train: /media/zjy/Elements SE/11111/UED_FLOW/scand/train/
+  #   test: /media/zjy/Elements SE/11111/UED_FLOW/scand/test/
+  #   end_slack: 3 # because many trajectories end in collisions
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  #   waypoint_spacing: 1  
+    
 
 # logging stuff
 ## =0 turns off

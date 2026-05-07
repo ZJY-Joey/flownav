@@ -1,0 +1,121 @@
+{
+  "test": "recon_head_horizon_summary",
+  "output_variant": "flownav_baseline",
+  "config": "flownav/config/flownav.yaml",
+  "checkpoint": "logs/flownav0421/latest.pth",
+  "dataset": "recon",
+  "split": "test",
+  "angle_threshold_deg": 10.0,
+  "direction_convention": {
+    "left": "angle > 10.0 deg",
+    "forward": "|angle| <= 10.0 deg",
+    "right": "angle < -10.0 deg"
+  },
+  "horizon_buckets_local_metric_m": {
+    "short": "[0, 2)",
+    "mid": "[2, 4)",
+    "long": "[4, max_offset_range]"
+  },
+  "scan_batches": 200,
+  "batch_size": 64,
+  "scan_items": 12800,
+  "max_sets": null,
+  "num_rows": 18543,
+  "num_matched_observations": 6168,
+  "metric_rows": [
+    {
+      "direction": "left",
+      "bucket": "short",
+      "count_subgoal": 2221,
+      "count_goal": 2221,
+      "subgoal_goal_rbf_mmd": 1.0315647721290588,
+      "subgoal_goal_sliced_wasserstein": 0.5871868799238629,
+      "subgoal_mean_dist": 0.2624199092388153,
+      "goal_mean_dist": 1.191393256187439
+    },
+    {
+      "direction": "left",
+      "bucket": "mid",
+      "count_subgoal": 2221,
+      "count_goal": 2221,
+      "subgoal_goal_rbf_mmd": 0.8883441686630249,
+      "subgoal_goal_sliced_wasserstein": 1.7759558895214411,
+      "subgoal_mean_dist": 0.2624199092388153,
+      "goal_mean_dist": 3.002554416656494
+    },
+    {
+      "direction": "left",
+      "bucket": "long",
+      "count_subgoal": 2221,
+      "count_goal": 2221,
+      "subgoal_goal_rbf_mmd": 0.8235594034194946,
+      "subgoal_goal_sliced_wasserstein": 2.6966686212664466,
+      "subgoal_mean_dist": 0.2624199092388153,
+      "goal_mean_dist": 4.4104084968566895
+    },
+    {
+      "direction": "forward",
+      "bucket": "short",
+      "count_subgoal": 1531,
+      "count_goal": 1531,
+      "subgoal_goal_rbf_mmd": 1.0367013216018677,
+      "subgoal_goal_sliced_wasserstein": 0.5177547040422942,
+      "subgoal_mean_dist": 0.25724178552627563,
+      "goal_mean_dist": 1.102634072303772
+    },
+    {
+      "direction": "forward",
+      "bucket": "mid",
+      "count_subgoal": 1531,
+      "count_goal": 1531,
+      "subgoal_goal_rbf_mmd": 1.3724345564842224,
+      "subgoal_goal_sliced_wasserstein": 1.6837086637899656,
+      "subgoal_mean_dist": 0.25813645124435425,
+      "goal_mean_dist": 3.0259382724761963
+    },
+    {
+      "direction": "forward",
+      "bucket": "long",
+      "count_subgoal": 1531,
+      "count_goal": 1531,
+      "subgoal_goal_rbf_mmd": 1.1553879380226135,
+      "subgoal_goal_sliced_wasserstein": 2.4956947693367906,
+      "subgoal_mean_dist": 0.25813645124435425,
+      "goal_mean_dist": 4.364689826965332
+    },
+    {
+      "direction": "right",
+      "bucket": "short",
+      "count_subgoal": 2429,
+      "count_goal": 2429,
+      "subgoal_goal_rbf_mmd": 1.0293585658073425,
+      "subgoal_goal_sliced_wasserstein": 0.5630163481839559,
+      "subgoal_mean_dist": 0.2631819248199463,
+      "goal_mean_dist": 1.19562828540802
+    },
+    {
+      "direction": "right",
+      "bucket": "mid",
+      "count_subgoal": 2429,
+      "count_goal": 2429,
+      "subgoal_goal_rbf_mmd": 0.8544913530349731,
+      "subgoal_goal_sliced_wasserstein": 1.6890076141084958,
+      "subgoal_mean_dist": 0.2631819248199463,
+      "goal_mean_dist": 3.007962226867676
+    },
+    {
+      "direction": "right",
+      "bucket": "long",
+      "count_subgoal": 2429,
+      "count_goal": 2429,
+      "subgoal_goal_rbf_mmd": 0.817273736000061,
+      "subgoal_goal_sliced_wasserstein": 2.588180284619602,
+      "subgoal_mean_dist": 0.2631819248199463,
+      "goal_mean_dist": 4.4258646965026855
+    }
+  ],
+  "items_csv": "test_logs_horizon/flownav_baseline/head_horizon_summary/recon_head_horizon_items_20260507_142327.csv",
+  "metrics_csv": "test_logs_horizon/flownav_baseline/head_horizon_summary/recon_head_horizon_metrics_20260507_142327.csv",
+  "distribution_png": "test_logs_horizon/flownav_baseline/head_horizon_summary/fig_recon_head_horizon_distribution.png",
+  "metrics_png": "test_logs_horizon/flownav_baseline/head_horizon_summary/fig_recon_head_horizon_metrics.png"
+}

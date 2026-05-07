@@ -1,0 +1,11 @@
+{
+  "head_backfill_found": true,
+  "dist_pred_item_rows": 4590,
+  "mask_bucket_rows": 0,
+  "swap_bucket_rows": 9,
+  "horizon_head_bucket_rows": 9,
+  "endpoint_distribution_images": 9,
+  "expected_mask_bucket_rows": 9,
+  "expected_swap_bucket_rows": 9,
+  "expected_endpoint_distribution_images": 9
+}

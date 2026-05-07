@@ -19,6 +19,8 @@ Chinese documentation: [README_CN.md](README_CN.md).
 Current active scope:
 
 - `goal_swap_visualization.py`
+- `dist_head_backfill.py`
+- `topomap_subgoal_analysis.py`
 - `goal_mask_sensitivity.py`
 - `generate_summary_figures.py`
 - `common.py`, only for utilities used by the active scripts
@@ -193,11 +195,14 @@ For each valid matched sample:
 5. Mark a sample as anomalous when different goals produce overly similar
    endpoint distributions.
 
-The script automatically runs two settings:
+By default, the script runs two settings. Use `--heading-filter-mode` to run
+only one setting:
 
 - `heading_filter`: goal image heading must be compatible with the selected
   left/forward/right class.
 - `no_heading_filter`: only `goal_pos` direction is used for class selection.
+- `both`: run both settings and write the parent-folder heading-filter
+  comparison.
 
 Trajectory selection modes:
 
@@ -244,6 +249,15 @@ test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p5-emd0p2/
   - Runs anomaly filtering using MMD/EMD thresholds.
   - Saves anomalous sample visualizations, endpoint plots, JSON metadata, and
     `anomaly_indices.txt`.
+  - Horizon-filtered runs skip this stage automatically when any
+    `--min/--max-goal-offset` or `--min/--max-goal-pos-dist` argument is set.
+    This keeps horizon sweeps focused on the full matched population.
+  - Horizon-filtered runs also allow partial directional sets. If a matched
+    observation has only one or two of left/forward/right, the script samples
+    the available directions and computes metrics only for available pairs.
+    Regular non-horizon `test_logs` swap runs still require all three directions.
+  - If a horizon-filtered bucket has no directional goals at all, the script
+    writes an empty summary with `scan_error` instead of aborting the sweep.
 
 - `goal_swap_global_endpoints_*.png`
   - Left panel: sampled endpoint distributions for left/forward/right goals.
@@ -305,8 +319,16 @@ python test_scripts/goal_swap_visualization.py \
   --max-direction-angle-deg 90 \
   --anomaly-mmd-threshold 0.5 \
   --anomaly-emd-threshold 0.2 \
+  --heading-filter-mode no_heading_filter \
   --global-endpoint-max-points-per-class 10000 \
+  --global-metric-max-points-per-class 5000 \
   --output-dir test_logs
+```
+
+For full-population runs that should not write anomaly outputs, add:
+
+```bash
+--skip-anomaly-stage
 ```
 
 Run the clustered trajectory-selection variant:
@@ -341,7 +363,10 @@ python test_scripts/goal_swap_visualization.py \
   `--anomaly-emd-threshold`.
 - If too many anomalies are found, lower those thresholds.
 - If global plots are too dense, lower `--global-endpoint-max-points-per-class`.
-  This only affects plotted points; metrics still use all points.
+  This only affects plotted points.
+- `--global-metric-max-points-per-class` caps the points per direction used for
+  global pairwise MMD/EMD. The default is 5000 to avoid O(N^2) memory blowups;
+  per-sample metrics still use all sampled trajectories.
 
 ## Archived: Goal-Inconsistent Rate
 
@@ -567,7 +592,216 @@ Control left/forward/right matching strictness:
 --angle-threshold-deg 10 --max-direction-angle-deg 90
 ```
 
-## Summary Figure Generation
+Control the local metric distance of matched goals:
+
+```bash
+--min-goal-pos-dist 8 --max-goal-pos-dist 12
+```
+
+This filters candidates by `norm(goal_pos[:2])` in the current robot frame. It
+is different from `--min-goal-offset/--max-goal-offset`, which filters by future
+trajectory index/time offset rather than meters.
+
+Any run with `--min/--max-goal-offset` or `--min/--max-goal-pos-dist` is treated
+as a horizon-filtered run by `goal_swap_visualization.py`; it writes only the
+`all_samples` stage, skips anomaly testing, and does not require all
+left/forward/right directions to be present in the same matched observation.
+
+## Head-Level Utilities
+
+## Dist-Head Backfill
+
+File: `dist_head_backfill.py`
+
+This script reuses existing `goal_swap_visualization_summary_*.json` matched
+samples and runs only the vision encoder plus `dist_pred_net`. It does not run
+the flow head or diffusion sampling again.
+
+For each matched observation with left/forward/right goals, it writes
+`dist_head_backfill_summary_*.json` and `dist_head_backfill_items_*.csv` next to
+the source goal-swap summary. Before writing, it removes old
+`dist_head_backfill_summary_*.json` and `dist_head_backfill_items_*.csv` files in
+that same output directory so downstream summary scripts read only the latest
+backfill. It does not remove the original goal-swap summaries, images, or other
+logs.
+
+The main metrics are:
+
+- `dist_pred_pair_l2`
+- `goal_pos_pair_distance`
+- `dist_pred_goal_normalized_sensitivity`
+- `dist_pred_rank_accuracy`
+- `dist_pred_goal_offset_spearman`
+- `flow_endpoint_pair_distance`, copied from the existing goal-swap summary
+- `flow_goal_normalized_sensitivity`
+- `flow_vs_dist_goal_normalized_ratio`
+- `flow_goal_direction_alignment`, available for goal-swap summaries generated
+  after endpoint mean logging was added
+
+Run for all baseline all-sample goal-swap summaries:
+
+```bash
+python3 test_scripts/dist_head_backfill.py \
+  --log-root test_logs \
+  --variant flownav_baseline \
+  --keep-going
+```
+
+Run for one existing summary:
+
+```bash
+python3 test_scripts/dist_head_backfill.py \
+  --summary-path test_logs/flownav_baseline/recon/goal_swap_visualization/angle10-mmd0p2-emd1/all_samples/no_heading_filter/goal_swap_visualization_summary_YYYYMMDD_HHMMSS.json
+```
+
+## Focused Head/Goal Response Figures
+
+File: `generate_head_horizon_figures.py`
+
+This script generates focused figures for the head-level goal-response
+analysis:
+
+- `fig_dist_pred_by_goal_pos_dist.png`
+  - One row with three dataset panels.
+  - Each panel plots per-direction `dist_pred` values against local metric goal
+    distance `norm(goal_pos[:2])` from the dist-head backfill rows.
+  - Use this figure to judge whether `dist_pred` changes with local goal
+    distance and whether left/forward/right directions occupy different value
+    ranges.
+
+- `fig_endpoint_goal_distribution_by_horizon.png`
+  - A dataset x horizon-bucket collage.
+  - Rows are datasets; columns are short, mid, and long local goal-distance buckets.
+  - Each panel reuses the corresponding horizon swap global endpoint figure,
+    which shows endpoint distributions and matched goal-position distributions.
+  - Use this figure to inspect whether flow endpoints move with goal offset and
+    whether endpoint clusters track the goal-position clusters.
+
+- `fig_endpoint_mmd_emd_by_horizon.png`
+  - Two-panel line chart across short, mid, and long local goal-distance
+    buckets.
+  - Each dataset is one line.
+  - Panel A shows mean endpoint RBF-MMD; panel B shows mean endpoint sliced
+    Wasserstein.
+  - Use this figure to inspect whether endpoint distribution separability
+    decreases or changes with longer goal distance.
+
+- `fig_flow_vs_dist_sensitivity_by_horizon.png`
+  - Raw response-magnitude comparison. Flow uses endpoint pair distance; dist
+    uses `dist_pred` pair difference. These are not in the same units.
+
+- `fig_goal_normalized_flow_vs_dist_sensitivity_by_horizon.png`
+  - Goal-space calibrated comparison.
+  - Flow sensitivity is endpoint pair distance divided by goal-pose pair
+    distance.
+  - Dist sensitivity is `dist_pred` pair difference divided by goal-pose pair
+    distance.
+  - The ratio panel compares those two normalized sensitivities.
+
+It also writes CSV tables for inspection:
+
+- `head_level_summary.csv`
+- `dist_pred_goal_pos_dist_items.csv`
+- `horizon_mask_summary.csv`
+- `horizon_swap_summary.csv`
+- `horizon_head_level_summary.csv`
+- `endpoint_distribution_images.csv`
+- `missing_or_counts.json`
+
+Run:
+
+```bash
+python3 test_scripts/generate_head_horizon_figures.py \
+  --head-log-root test_logs \
+  --horizon-root test_logs_horizon \
+  --variant flownav_baseline \
+  --output-dir test_logs_horizon/flownav_baseline/head_horizon_summary
+```
+
+## Topomap Subgoal Analysis
+
+File: `topomap_subgoal_analysis.py`
+
+This script tests whether different final goals collapse to the same local
+topomap subgoal. It uses the same trajectory as the offline topomap and
+replays the deployment-style local topomap selection:
+
+1. Build directional final goals in local metric distance buckets: short
+   `0-7m`, mid `8-12m`, long `13-19m`. A cell does not require all
+   left/forward/right directions to exist; available directions are plotted.
+2. For each fixed observation and each final goal, score topomap nodes in a
+   local window with `dist_pred_net`.
+3. Select the closest node and the next local subgoal using the deployment
+   `close_threshold` rule.
+4. Aggregate selected subgoals, final goal poses, and available flow endpoint
+   means.
+
+Per-cell panel PNGs are written under each dataset/bucket folder:
+
+```text
+test_logs_horizon/topomap_subgoal_analysis/<bucket>/flownav_baseline/<dataset>/
+```
+
+- `panel_topomap_subgoal_vs_goal_pose.png`
+- `panel_flow_endpoint_vs_topomap_subgoal.png`
+
+The final summary figures under
+`test_logs_horizon/topomap_subgoal_analysis/flownav_baseline/summary/` are
+montages that only stitch existing PNGs:
+
+- `fig_topomap_subgoal_vs_goal_pose.png`
+  - Dataset x metric-distance bucket collage.
+  - Each cell has selected subgoal distribution on the left and final goal-pose
+    distribution on the right.
+  - Left/forward/right are colored separately and outlined with covariance
+    circles when that direction exists.
+
+- `fig_flow_endpoint_vs_topomap_subgoal.png`
+  - Dataset x metric-distance bucket collage.
+  - Each cell has flow endpoint-mean distribution on the left and selected
+    subgoal distribution on the right.
+  - Flow endpoint panels require matching metric-distance `goal_swap` logs under
+    `--swap-log-root`.
+
+- `fig_flow_endpoint_vs_goal_pose.png`
+  - Dataset x metric-distance bucket collage.
+  - Each cell is the existing `goal_swap_global_endpoints_*.png` for that
+    dataset and bucket, so it shows flow endpoint distribution and matched goal
+    position distribution without redrawing points.
+
+- `fig_endpoint_mmd_emd_by_goal_distance.png`
+  - Line chart over short, mid, and long buckets.
+  - Panel A is mean endpoint RBF-MMD; panel B is mean endpoint sliced
+    Wasserstein.
+  - This is read from existing horizon goal-swap summaries.
+
+- `fig_final_goal_dist_pred_error_by_goal_distance.png`
+  - Line chart over short, mid, and long buckets.
+  - Compares mean final-goal `dist_pred` with mean true local goal distance,
+    and plots their mean difference.
+  - This requires rerunning `topomap_subgoal_analysis.py`, because
+    `final_goal_dist_pred` is recorded during topomap/dist-head inference.
+
+Run after metric-distance goal-swap logs have been generated:
+
+```bash
+python3 test_scripts/topomap_subgoal_analysis.py \
+  --output-dir test_logs_horizon \
+  --swap-log-root test_logs_horizon \
+  --scan-batches 200 \
+  --batch-size 64 \
+  --angle-threshold-deg 10
+```
+
+To only rebuild the three summary montages from existing PNGs, without loading
+the model or rerunning inference:
+
+```bash
+python3 test_scripts/topomap_subgoal_analysis.py \
+  --output-dir test_logs_horizon \
+  --swap-log-root test_logs_horizon \
+  --montage-only
+```
 
 ## Summary Figure Generation
 
