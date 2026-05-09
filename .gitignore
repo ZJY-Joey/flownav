@@ -155,4 +155,8 @@ deployment/src/test/*
 deployment/src/explore_topomap/*
 conditional-flow-matching/
 wandb/
+data
+logs
+depth_anything_weights
+flownav/config/*server*.yaml
 
