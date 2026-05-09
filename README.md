@@ -51,6 +51,14 @@ Then, run the following command:
 python train.py -c <YOUR_CONFIG>.yaml
 ```
 
+For 8-GPU DDP training, set `use_ddp: True` and `gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]` in the config, then launch with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nproc_per_node=8 train.py -c <YOUR_CONFIG>.yaml
+```
+
+With DDP, `batch_size` and `num_workers` are per GPU/process. The effective global batch size is `batch_size * 8`.
+
 If you want to use [wandb](https://wandb.ai/) to log the training, you can set the `use_wandb` flag in the configuration YAML to `True` and  the `project` and `entity` to your desired project and entity (usually your username). Don't forget to login first:
     
 ```bash
