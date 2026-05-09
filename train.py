@@ -6,12 +6,15 @@ import click
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import torch.distributed as dist
 import torch.nn as nn
 import wandb
 import yaml
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from torch.optim import AdamW
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from flownav.data.vint_dataset import ViNT_Dataset
 from flownav.models.nomad import DenseNetwork, NoMaD
@@ -20,8 +23,79 @@ from flownav.training.loop import main_loop
 from warmup_scheduler import GradualWarmupScheduler
 
 
+def is_dist_initialized() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def is_main_process(config: dict) -> bool:
+    return int(config.get("rank", 0)) == 0
+
+
+def rank0_echo(config: dict, message: str, **style_kwargs) -> None:
+    if is_main_process(config):
+        click.echo(click.style(message, **style_kwargs))
+
+
+def setup_distributed(config: dict) -> dict:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    use_ddp = bool(config.get("use_ddp", False)) or world_size > 1
+    if use_ddp and world_size == 1:
+        raise RuntimeError("DDP is enabled; launch with torchrun so WORLD_SIZE > 1.")
+    config["distributed"] = use_ddp
+    config["rank"] = int(os.environ.get("RANK", "0"))
+    config["local_rank"] = int(os.environ.get("LOCAL_RANK", "0"))
+    config["world_size"] = world_size
+
+    if not use_ddp:
+        return config
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("DDP training requires CUDA GPUs.")
+    if not is_dist_initialized():
+        dist.init_process_group(backend=config.get("dist_backend", "nccl"))
+    torch.cuda.set_device(config["local_rank"])
+    return config
+
+
+def cleanup_distributed() -> None:
+    if is_dist_initialized():
+        dist.destroy_process_group()
+
+
+def broadcast_from_rank0(value):
+    if not is_dist_initialized():
+        return value
+    values = [value]
+    dist.broadcast_object_list(values, src=0)
+    return values[0]
+
+
+def strip_module_prefix(state_dict: dict) -> dict:
+    if not any(key.startswith("module.") for key in state_dict):
+        return state_dict
+    return {key.removeprefix("module."): value for key, value in state_dict.items()}
+
+
+def dataloader_kwargs(config: dict, split: str) -> dict:
+    num_workers_key = "num_workers" if split == "train" else "eval_num_workers"
+    num_workers = int(config.get(num_workers_key, config.get("num_workers", 0)))
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": bool(config.get("pin_memory", torch.cuda.is_available())),
+        "drop_last": bool(config.get(f"{split}_drop_last", split == "train")),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(config.get("persistent_workers", True))
+        kwargs["prefetch_factor"] = int(config.get("prefetch_factor", 4))
+    return kwargs
+
+
 def main(config: dict) -> None:
     train_model = bool(config["train"])
+    distributed = bool(config.get("distributed", False))
+    rank = int(config.get("rank", 0))
+    local_rank = int(config.get("local_rank", 0))
+    main_process = is_main_process(config)
 
     # Set up the device
     if torch.cuda.is_available():
@@ -30,23 +104,35 @@ def main(config: dict) -> None:
             config["gpu_ids"] = [0]
         elif isinstance(config["gpu_ids"], int):
             config["gpu_ids"] = [config["gpu_ids"]]
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-            [str(x) for x in config["gpu_ids"]]
-        )
-        click.echo(
-            click.style(f">> Using GPUs: {config['gpu_ids']}", fg="green", bold=True)
-        )
+        if distributed and len(config["gpu_ids"]) == 1 and config["world_size"] > 1:
+            config["gpu_ids"] = list(range(config["world_size"]))
+        if not distributed:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                [str(x) for x in config["gpu_ids"]]
+            )
+        if main_process:
+            if distributed:
+                message = (
+                    f">> Using DDP with {config['world_size']} processes; "
+                    f"visible GPUs: {config['gpu_ids']}"
+                )
+            else:
+                message = f">> Using GPUs: {config['gpu_ids']}"
+            click.echo(click.style(message, fg="green", bold=True))
     else:
-        click.echo(click.style(">> No GPUs available, using CPU", fg="red", bold=True))
-    first_gpu_id = config["gpu_ids"][0]
-    device = torch.device(
-        f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
-    )
+        rank0_echo(config, ">> No GPUs available, using CPU", fg="red", bold=True)
+    if distributed:
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # Set seed for reproducibility
     if "seed" in config:
-        np.random.seed(config["seed"])
-        torch.manual_seed(config["seed"])
+        seed = int(config["seed"]) + rank
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         cudnn.deterministic = True
     cudnn.benchmark = True
 
@@ -64,6 +150,8 @@ def main(config: dict) -> None:
         data_config = config["datasets"][dataset_name]
         for data_split_type in ["train", "test"]:
             if data_split_type == "train" and not train_model:
+                continue
+            if data_split_type == "test" and distributed and not main_process:
                 continue
             if data_split_type in data_config:
                 dataset = ViNT_Dataset(
@@ -94,22 +182,32 @@ def main(config: dict) -> None:
                         test_dataloaders[dataset_type] = {}
                     test_dataloaders[dataset_type] = dataset
     train_loader = None
+    train_sampler = None
     if train_model:
         train_dataset = ConcatDataset(train_dataset)
+        if distributed:
+            train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=config["world_size"],
+                rank=rank,
+                shuffle=True,
+                drop_last=bool(config.get("train_drop_last", True)),
+            )
         train_loader = DataLoader(
             dataset=train_dataset,
             batch_size=config["batch_size"],
-            shuffle=True,
-            num_workers=config["num_workers"],
-            drop_last=False,
-            persistent_workers=False,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            **dataloader_kwargs(config, "train"),
         )
-        click.echo(
-            click.style(
-                f">> Loaded {len(train_dataset)} training samples",
-                fg="cyan",
-                bold=True,
-            )
+        rank0_echo(
+            config,
+            (
+                f">> Loaded {len(train_dataset)} training samples "
+                f"({config['batch_size']} per GPU/process)"
+            ),
+            fg="cyan",
+            bold=True,
         )
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
@@ -117,16 +215,14 @@ def main(config: dict) -> None:
         test_dataloaders[dataset_type] = DataLoader(
             dataset=dataset,
             batch_size=config["eval_batch_size"],
-            shuffle=True,
-            num_workers=0,
-            drop_last=False,
+            shuffle=bool(config.get("eval_shuffle", False)),
+            **dataloader_kwargs(config, "eval"),
         )
-        click.echo(
-            click.style(
-                f">> Loaded {len(dataset)} test samples for {dataset_type}",
-                fg="cyan",
-                bold=True,
-            )
+        rank0_echo(
+            config,
+            f">> Loaded {len(dataset)} test samples for {dataset_type}",
+            fg="cyan",
+            bold=True,
         )
 
     # Create the model
@@ -209,22 +305,31 @@ def main(config: dict) -> None:
                     fg="red",
                 )
             )
-        latest_checkpoint = torch.load(latest_path)
+        latest_checkpoint = torch.load(latest_path, map_location=device)
         if "model" in latest_checkpoint:
-            model.load_state_dict(latest_checkpoint["model"], strict=True)
+            model.load_state_dict(
+                strip_module_prefix(latest_checkpoint["model"]), strict=True
+            )
         else:
-            model.load_state_dict(latest_checkpoint, strict=True)
+            model.load_state_dict(strip_module_prefix(latest_checkpoint), strict=True)
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
         if train_model and optimizer is not None and "optimizer" in latest_checkpoint:
-            optimizer.load_state_dict(latest_checkpoint["optimizer"].state_dict())
+            optimizer.load_state_dict(latest_checkpoint["optimizer"])
         if train_model and scheduler is not None and "scheduler" in latest_checkpoint:
-            scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
+            scheduler.load_state_dict(latest_checkpoint["scheduler"])
 
     # Multi-GPU setup
-    if len(config["gpu_ids"]) > 1:
-        model = nn.DataParallel(model, device_ids=config["gpu_ids"])
     model = model.to(device)
+    if distributed:
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=bool(config.get("find_unused_parameters", False)),
+        )
+    elif len(config["gpu_ids"]) > 1:
+        model = nn.DataParallel(model)
 
     # Run the training loop
     main_loop(
@@ -248,16 +353,20 @@ def main(config: dict) -> None:
         use_wandb=config["use_wandb"],
         eval_fraction=config["eval_fraction"],
         eval_freq=config["eval_freq"],
+        use_amp=config.get("use_amp", False),
+        train_sampler=train_sampler,
+        is_main_process=main_process,
+        distributed=distributed,
     )
     if train_model:
         message = f">> Training completed. Model saved to {config['project_folder']}"
     else:
         message = f">> Evaluation completed. Logs saved to {config['project_folder']}"
-    click.echo(click.style(message, fg="green", bold=True))
+    rank0_echo(config, message, fg="green", bold=True)
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("spawn", force=True)
 
     # Parse command line arguments
     parser = argparse.ArgumentParser()
@@ -268,6 +377,7 @@ if __name__ == "__main__":
         type=str,
         help="Path to the config file",
     )
+    parser.add_argument("--local_rank", "--local-rank", type=int, default=0)
     args = parser.parse_args()
 
     # Load the configuration
@@ -276,25 +386,32 @@ if __name__ == "__main__":
         default_config = yaml.safe_load(f)
     config = default_config
     with open(args.config, "r") as f:
-        user_config = yaml.safe_load(f)
-    click.echo(click.style(f">> Using config file: {args.config}", fg="yellow"))
+        user_config = yaml.safe_load(f) or {}
 
     # Create the project folder and update the configuration
     config.update(user_config)
-    config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
+    config = setup_distributed(config)
+    if is_main_process(config):
+        click.echo(click.style(f">> Using config file: {args.config}", fg="yellow"))
+
+    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S") if is_main_process(config) else None
+    timestamp = broadcast_from_rank0(timestamp)
+    config["run_name"] += "_" + timestamp
     config["project_folder"] = os.path.join(
         "logs", config["project_name"], config["run_name"]
     )
-    os.makedirs(
-        config["project_folder"],
-    )
-    click.echo(
-        click.style(
-            f">> Project folder created: {config['project_folder']}", fg="yellow"
+    if is_main_process(config):
+        os.makedirs(config["project_folder"], exist_ok=True)
+        click.echo(
+            click.style(
+                f">> Project folder created: {config['project_folder']}", fg="yellow"
+            )
         )
-    )
+    if is_dist_initialized():
+        dist.barrier()
 
     # Set wandb configuration
+    config["use_wandb"] = bool(config["use_wandb"] and is_main_process(config))
     if config["use_wandb"]:
         wandb.login()
         wandb.init(
@@ -307,4 +424,7 @@ if __name__ == "__main__":
         if wandb.run:
             wandb.config.update(config)
 
-    main(config)
+    try:
+        main(config)
+    finally:
+        cleanup_distributed()

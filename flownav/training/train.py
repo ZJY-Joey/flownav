@@ -38,6 +38,9 @@ def train(
     image_log_freq: int = 1000,
     num_images_log: int = 8,
     use_wandb: bool = True,
+    use_amp: bool = False,
+    scaler: torch.amp.GradScaler | None = None,
+    is_main_process: bool = True,
 ):
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
     model.train()
@@ -77,6 +80,7 @@ def train(
         leave=True,
         dynamic_ncols=True,
         colour="magenta",
+        disable=not is_main_process,
     ) as tepoch:
         for i, data in enumerate(tepoch):
             (
@@ -109,61 +113,72 @@ def train(
             ndeltas = normalize_data(deltas, ACTION_STATS)
             naction = from_numpy(ndeltas).to(device)
 
-            # Get batch size
-            B = actions.shape[0]
+            amp_enabled = use_amp and device.type == "cuda"
+            with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                # Get batch size
+                B = actions.shape[0]
 
-            # Generate random goal mask
-            goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
-            obsgoal_cond = model(
-                "vision_encoder",
-                obs_img=batch_obs_images,
-                goal_img=batch_goal_images,
-                input_goal_mask=goal_mask,
-            )
+                # Generate random goal mask
+                goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
+                obsgoal_cond = model(
+                    "vision_encoder",
+                    obs_img=batch_obs_images,
+                    goal_img=batch_goal_images,
+                    input_goal_mask=goal_mask,
+                )
 
-            # Get distance label
-            distance = distance.float().to(device)
+                # Get distance label
+                distance = distance.float().to(device)
 
-            # Predict distance
-            dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-            dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
-            dist_loss = (dist_loss * (1 - goal_mask.float())).mean() / (
-                1e-2 + (1 - goal_mask.float()).mean()
-            )
+                # Predict distance
+                dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
+                dist_loss = (dist_loss * (1 - goal_mask.float())).mean() / (
+                    1e-2 + (1 - goal_mask.float()).mean()
+                )
 
-            # Sample noise to add to actions
-            noise = torch.randn(naction.shape, device=device)
+                # Sample noise to add to actions
+                noise = torch.randn(naction.shape, device=device)
 
-            # Flow
-            FM = ConditionalFlowMatcher(sigma=0.0)
-            t, xt, ut = FM.sample_location_and_conditional_flow(x0=noise, x1=naction)
-            vt = model(
-                "noise_pred_net", sample=xt, timestep=t, global_cond=obsgoal_cond
-            )
+                # Flow
+                FM = ConditionalFlowMatcher(sigma=0.0)
+                t, xt, ut = FM.sample_location_and_conditional_flow(x0=noise, x1=naction)
+                vt = model(
+                    "noise_pred_net", sample=xt, timestep=t, global_cond=obsgoal_cond
+                )
 
-            # L2 loss
-            flow_loss = action_reduce(F.mse_loss(vt, ut, reduction="none"), action_mask)
+                # L2 loss
+                flow_loss = action_reduce(
+                    F.mse_loss(vt, ut, reduction="none"), action_mask
+                )
 
-            # Total loss
-            loss = alpha * dist_loss + (1 - alpha) * flow_loss
+                # Total loss
+                loss = alpha * dist_loss + (1 - alpha) * flow_loss
 
             # Optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if amp_enabled:
+                assert scaler is not None
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             # Update Exponential Moving Average of the model weights
-            ema_model.step(model)
+            ema_model.step(model.module if hasattr(model, "module") else model)
 
             # Logging
             loss_cpu = loss.item()
-            tepoch.set_postfix(loss=loss_cpu)
-            if use_wandb:
+            if is_main_process:
+                tepoch.set_postfix(loss=loss_cpu)
+            if use_wandb and is_main_process:
                 wandb.log({"total_loss": loss_cpu})
                 wandb.log({"dist_loss": dist_loss.item()})
                 wandb.log({"flow_loss": flow_loss.item()})
 
-            if i % print_log_freq == 0:
+            if is_main_process and i % print_log_freq == 0:
                 losses = compute_losses(
                     ema_model=ema_model.averaged_model,
                     batch_obs_images=batch_obs_images,
@@ -191,7 +206,7 @@ def train(
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
                     wandb.log(data_log, commit=True)
 
-            if image_log_freq != 0 and i % image_log_freq == 0:
+            if is_main_process and image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_action_distribution(
                     ema_model=ema_model.averaged_model,
                     batch_obs_images=batch_obs_images,
