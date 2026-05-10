@@ -76,6 +76,18 @@ def strip_module_prefix(state_dict: dict) -> dict:
     return {key.removeprefix("module."): value for key, value in state_dict.items()}
 
 
+def checkpoint_model_state(checkpoint: dict) -> dict:
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        return checkpoint["model"]
+    return checkpoint
+
+
+def load_sidecar_checkpoint(path: str, device: torch.device):
+    if not os.path.isfile(path):
+        return None
+    return torch.load(path, map_location=device)
+
+
 def dataloader_kwargs(config: dict, split: str) -> dict:
     num_workers_key = "num_workers" if split == "train" else "eval_num_workers"
     num_workers = int(config.get(num_workers_key, config.get("num_workers", 0)))
@@ -286,6 +298,7 @@ def main(config: dict) -> None:
 
     # Load pre-trained model if specified
     current_epoch = 0
+    checkpoint_state = None
     if "load_run" in config:
         load_project_folder = os.path.join("logs", config["load_run"])
         click.echo(
@@ -305,19 +318,71 @@ def main(config: dict) -> None:
                     fg="red",
                 )
             )
+            raise FileNotFoundError(load_project_folder)
         latest_checkpoint = torch.load(latest_path, map_location=device)
-        if "model" in latest_checkpoint:
-            model.load_state_dict(
-                strip_module_prefix(latest_checkpoint["model"]), strict=True
-            )
-        else:
-            model.load_state_dict(strip_module_prefix(latest_checkpoint), strict=True)
-        if "epoch" in latest_checkpoint:
+        model.load_state_dict(
+            strip_module_prefix(checkpoint_model_state(latest_checkpoint)), strict=True
+        )
+        if (
+            train_model
+            and bool(config.get("resume", False))
+            and isinstance(latest_checkpoint, dict)
+            and "epoch" in latest_checkpoint
+        ):
             current_epoch = latest_checkpoint["epoch"] + 1
-        if train_model and optimizer is not None and "optimizer" in latest_checkpoint:
+        if (
+            train_model
+            and bool(config.get("resume", False))
+            and isinstance(latest_checkpoint, dict)
+            and "optimizer" in latest_checkpoint
+        ):
             optimizer.load_state_dict(latest_checkpoint["optimizer"])
-        if train_model and scheduler is not None and "scheduler" in latest_checkpoint:
+        elif train_model and bool(config.get("resume", False)) and optimizer is not None:
+            optimizer_state = load_sidecar_checkpoint(
+                os.path.join(os.path.dirname(latest_path), "optimizer_latest.pth"),
+                device,
+            )
+            if optimizer_state is not None:
+                optimizer.load_state_dict(optimizer_state)
+        if (
+            train_model
+            and bool(config.get("resume", False))
+            and scheduler is not None
+            and isinstance(latest_checkpoint, dict)
+            and "scheduler" in latest_checkpoint
+        ):
             scheduler.load_state_dict(latest_checkpoint["scheduler"])
+        elif train_model and bool(config.get("resume", False)) and scheduler is not None:
+            scheduler_state = load_sidecar_checkpoint(
+                os.path.join(os.path.dirname(latest_path), "scheduler_latest.pth"),
+                device,
+            )
+            if scheduler_state is not None:
+                scheduler.load_state_dict(scheduler_state)
+        if train_model and bool(config.get("resume", False)):
+            checkpoint_state = (
+                latest_checkpoint if isinstance(latest_checkpoint, dict) else None
+            )
+            if checkpoint_state is not None and "scaler" not in checkpoint_state:
+                scaler_state = load_sidecar_checkpoint(
+                    os.path.join(os.path.dirname(latest_path), "scaler_latest.pth"),
+                    device,
+                )
+                if scaler_state is not None:
+                    checkpoint_state["scaler"] = scaler_state
+            if checkpoint_state is None:
+                rank0_echo(
+                    config,
+                    ">> Loaded legacy model weights only; optimizer, scheduler, EMA, and scaler were not restored.",
+                    fg="yellow",
+                )
+            else:
+                rank0_echo(
+                    config,
+                    f">> Resuming training from epoch {current_epoch}",
+                    fg="green",
+                    bold=True,
+                )
 
     # Multi-GPU setup
     model = model.to(device)
@@ -354,6 +419,7 @@ def main(config: dict) -> None:
         eval_fraction=config["eval_fraction"],
         eval_freq=config["eval_freq"],
         use_amp=config.get("use_amp", False),
+        checkpoint_state=checkpoint_state,
         train_sampler=train_sampler,
         is_main_process=main_process,
         distributed=distributed,
@@ -394,12 +460,20 @@ if __name__ == "__main__":
     if is_main_process(config):
         click.echo(click.style(f">> Using config file: {args.config}", fg="yellow"))
 
-    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S") if is_main_process(config) else None
-    timestamp = broadcast_from_rank0(timestamp)
-    config["run_name"] += "_" + timestamp
-    config["project_folder"] = os.path.join(
-        "logs", config["project_name"], config["run_name"]
-    )
+    if bool(config.get("resume", False)):
+        if "load_run" not in config:
+            raise ValueError("resume: True requires load_run to point to an existing run.")
+        config["project_folder"] = os.path.join("logs", config["load_run"])
+        config["run_name"] = os.path.basename(os.path.normpath(config["load_run"]))
+    else:
+        timestamp = (
+            time.strftime("%Y_%m_%d_%H_%M_%S") if is_main_process(config) else None
+        )
+        timestamp = broadcast_from_rank0(timestamp)
+        config["run_name"] += "_" + timestamp
+        config["project_folder"] = os.path.join(
+            "logs", config["project_name"], config["run_name"]
+        )
     if is_main_process(config):
         os.makedirs(config["project_folder"], exist_ok=True)
         click.echo(
