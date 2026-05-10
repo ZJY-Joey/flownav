@@ -30,6 +30,20 @@ def state_dict_for_save(model: nn.Module) -> dict:
     return unwrap_model(model).state_dict()
 
 
+def ema_state_dict(ema_model: EMAModel) -> dict:
+    if hasattr(ema_model, "state_dict"):
+        return ema_model.state_dict()
+    return {"averaged_model": ema_model.averaged_model.state_dict()}
+
+
+def load_ema_state_dict(ema_model: EMAModel, state_dict: dict) -> None:
+    if hasattr(ema_model, "load_state_dict"):
+        ema_model.load_state_dict(state_dict)
+        return
+    averaged_model_state = state_dict.get("averaged_model", state_dict)
+    ema_model.averaged_model.load_state_dict(averaged_model_state)
+
+
 def main_loop(
     train_model: bool,
     model: nn.Module,
@@ -52,6 +66,7 @@ def main_loop(
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
     use_amp: bool = False,
+    checkpoint_state: Optional[dict] = None,
     train_sampler: Optional[DistributedSampler] = None,
     is_main_process: bool = True,
     distributed: bool = False,
@@ -61,6 +76,8 @@ def main_loop(
 
     # Create EMA model
     ema_model = EMAModel(model=unwrap_model(model), power=0.75)
+    if checkpoint_state is not None and "ema" in checkpoint_state:
+        load_ema_state_dict(ema_model, checkpoint_state["ema"])
 
     if not train_model:
         if not is_main_process:
@@ -96,15 +113,22 @@ def main_loop(
     assert lr_scheduler is not None
     assert train_loader is not None
     scaler = make_grad_scaler(device, use_amp)
+    if (
+        checkpoint_state is not None
+        and use_amp
+        and scaler is not None
+        and "scaler" in checkpoint_state
+    ):
+        scaler.load_state_dict(checkpoint_state["scaler"])
 
     # Run the epochs
-    for epoch in range(current_epoch, current_epoch + epochs):
+    for epoch in range(current_epoch, epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         if is_main_process:
             click.echo(
                 click.style(
-                    f"> Start epoch {epoch}/{current_epoch + epochs - 1}",
+                    f"> Start epoch {epoch}/{epochs - 1}",
                     fg="magenta",
                 )
             )
@@ -127,9 +151,8 @@ def main_loop(
             use_amp=use_amp,
             scaler=scaler,
             is_main_process=is_main_process,
+            distributed=distributed,
         )
-        lr_scheduler.step()
-
         # Save the model, EMA model, optimizer, and scheduler
         if is_main_process:
             numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
@@ -139,7 +162,18 @@ def main_loop(
 
             numbered_path = os.path.join(project_folder, f"{epoch}.pth")
             torch.save(state_dict_for_save(model), numbered_path)
-            torch.save(state_dict_for_save(model), latest_path)
+
+            checkpoint = {
+                "epoch": epoch,
+                "model": state_dict_for_save(model),
+                "ema": ema_state_dict(ema_model),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": lr_scheduler.state_dict(),
+                "config": {
+                    "use_amp": use_amp,
+                    "distributed": distributed,
+                },
+            }
 
             latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
             torch.save(optimizer.state_dict(), latest_optimizer_path)
@@ -149,7 +183,11 @@ def main_loop(
 
             latest_scaler_path = os.path.join(project_folder, "scaler_latest.pth")
             if use_amp and scaler is not None:
-                torch.save(scaler.state_dict(), latest_scaler_path)
+                scaler_state = scaler.state_dict()
+                checkpoint["scaler"] = scaler_state
+                torch.save(scaler_state, latest_scaler_path)
+
+            torch.save(checkpoint, latest_path)
 
         # In case of evaluation
         if is_main_process and (epoch + 1) % eval_freq == 0:

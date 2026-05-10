@@ -32,6 +32,7 @@ cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
 seed: 0
+resume: False # set True with load_run to continue an interrupted run in-place
 
 # model params
 model_type: nomad

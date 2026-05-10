@@ -57,7 +57,11 @@ def load_model(
 
     checkpoint = torch.load(model_path, map_location=device)
 
-    state_dict = checkpoint
+    state_dict = (
+        checkpoint["model"]
+        if isinstance(checkpoint, dict) and "model" in checkpoint
+        else checkpoint
+    )
     model.load_state_dict(state_dict, strict=False)
     
     model.to(device)
@@ -155,6 +159,4 @@ def remove_files_in_dir(dir_path: str):
                 shutil.rmtree(file_path)
         except Exception as e:
             print("Failed to delete %s. Reason: %s" % (file_path, e))
-
-
 
