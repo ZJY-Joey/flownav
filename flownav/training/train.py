@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
@@ -22,6 +23,20 @@ from flownav.training.utils import (
 )
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if hasattr(model, "module") else model
+
+
+def sync_gradients(model: nn.Module, distributed: bool) -> None:
+    if not distributed:
+        return
+    world_size = dist.get_world_size()
+    for parameter in unwrap_model(model).parameters():
+        if parameter.grad is not None:
+            dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+            parameter.grad.div_(world_size)
+
+
 def train(
     model: nn.Module,
     ema_model: EMAModel,
@@ -41,9 +56,11 @@ def train(
     use_amp: bool = False,
     scaler: torch.amp.GradScaler | None = None,
     is_main_process: bool = True,
+    distributed: bool = False,
 ):
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
-    model.train()
+    train_model = unwrap_model(model)
+    train_model.train()
     num_batches = len(dataloader)
 
     uc_action_loss_logger = Logger(
@@ -120,7 +137,7 @@ def train(
 
                 # Generate random goal mask
                 goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
-                obsgoal_cond = model(
+                obsgoal_cond = train_model(
                     "vision_encoder",
                     obs_img=batch_obs_images,
                     goal_img=batch_goal_images,
@@ -131,7 +148,7 @@ def train(
                 distance = distance.float().to(device)
 
                 # Predict distance
-                dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                dist_pred = train_model("dist_pred_net", obsgoal_cond=obsgoal_cond)
                 dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
                 dist_loss = (dist_loss * (1 - goal_mask.float())).mean() / (
                     1e-2 + (1 - goal_mask.float()).mean()
@@ -143,7 +160,7 @@ def train(
                 # Flow
                 FM = ConditionalFlowMatcher(sigma=0.0)
                 t, xt, ut = FM.sample_location_and_conditional_flow(x0=noise, x1=naction)
-                vt = model(
+                vt = train_model(
                     "noise_pred_net", sample=xt, timestep=t, global_cond=obsgoal_cond
                 )
 
@@ -160,14 +177,17 @@ def train(
             if amp_enabled:
                 assert scaler is not None
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                sync_gradients(model, distributed)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                sync_gradients(model, distributed)
                 optimizer.step()
 
             # Update Exponential Moving Average of the model weights
-            ema_model.step(model.module if hasattr(model, "module") else model)
+            ema_model.step(train_model)
 
             # Logging
             loss_cpu = loss.item()

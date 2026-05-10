@@ -151,6 +151,7 @@ def main_loop(
             use_amp=use_amp,
             scaler=scaler,
             is_main_process=is_main_process,
+            distributed=distributed,
         )
         # Save the model, EMA model, optimizer, and scheduler
         if is_main_process:
