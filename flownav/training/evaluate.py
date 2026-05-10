@@ -221,7 +221,11 @@ def evaluate(
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
                     wandb.log(data_log, commit=True)
 
-            if image_log_freq != 0 and i % image_log_freq == 0:
+            if (
+                image_log_freq != 0
+                and num_images_log > 0
+                and i % image_log_freq == 0
+            ):
                 visualize_action_distribution(
                     ema_model=ema_model,
                     batch_obs_images=batch_obs_images,
