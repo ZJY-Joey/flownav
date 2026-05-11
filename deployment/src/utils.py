@@ -19,9 +19,7 @@ from typing import List, Tuple, Dict, Optional
 
 # models
 
-from flownav.models.nomad import NoMaD, DenseNetwork
-from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+from flownav.models.factory import build_nomad_model
 from flownav.data.data_utils import IMAGE_ASPECT_RATIO
 import cv2
 
@@ -32,28 +30,7 @@ def load_model(
 ) -> nn.Module:
     """Load a model from a checkpoint file (works with models trained on multiple GPUs)"""
 
-    vision_encoder = NoMaD_ViNT(
-        obs_encoding_size=config["encoding_size"],
-        context_size=config["context_size"],
-        mha_num_attention_heads=config["mha_num_attention_heads"],
-        mha_num_attention_layers=config["mha_num_attention_layers"],
-        mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        depth_cfg=config["depth"]
-    )
-    vision_encoder = replace_bn_with_gn(vision_encoder)
-    noise_pred_net = ConditionalUnet1D(
-            input_dim=2,
-            global_cond_dim=config["encoding_size"],
-            down_dims=config["down_dims"],
-            cond_predict_scale=config["cond_predict_scale"],
-        )
-    dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-        
-    model = NoMaD(
-        vision_encoder=vision_encoder,
-        noise_pred_net=noise_pred_net,
-        dist_pred_net=dist_pred_network,
-    )
+    model = build_nomad_model(config)
 
     checkpoint = torch.load(model_path, map_location=device)
 
@@ -159,4 +136,3 @@ def remove_files_in_dir(dir_path: str):
                 shutil.rmtree(file_path)
         except Exception as e:
             print("Failed to delete %s. Reason: %s" % (file_path, e))
-
