@@ -1,6 +1,6 @@
 project_name: flownav
 entity: zengjiayi-joey
-run_name: flownav_baseline0507
+run_name: flownav_bicross
 
 # training setup
 use_wandb: True # set to false if you don't want to log to wandb
@@ -36,7 +36,7 @@ resume: False # set True with load_run to continue an interrupted run in-place
 
 # model params
 model_type: nomad
-vision_encoder: nomad_vint # options: nomad_vint, nomad_vint_bicross
+vision_encoder: nomad_vint_bicross
 encoding_size: 256
 obs_encoder: efficientnet-b0
 attn_unet: False
@@ -89,7 +89,7 @@ datasets:
   recon:
     data_folder: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/recon
     train: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/data_splits/recon/train # path to train folder with traj_names.txt
-    test: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/data_splits/recon/test # path to test folder with traj_names.txt
+    test: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/data_splits/recon/test # path to train folder with traj_names.txt
     end_slack: 3 # because many trajectories end in collisions
     goals_per_obs: 1 # how many goals are sampled per observation
     negative_mining: True # negative mining from the ViNG paper (Shah et al.)
@@ -102,30 +102,6 @@ datasets:
     goals_per_obs: 2 # increase dataset size
     negative_mining: True
     waypoint_spacing: 1
-  # cory_hall:
-  #   data_folder: /home/<username>/nomad_dataset/cory_hall/
-  #   train: /home/<username>/data_splits/cory_hall/train/
-  #   test: /home/<username>/data_splits/cory_hall/test/
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1
-  #   negative_mining: True
-  #   waypoint_spacing: 1
-  # tartan_drive:
-  #   data_folder: /home/<username>/nomad_dataset/tartan_drive/
-  #   train: /home/<username>/data_splits/tartan_drive/train/
-  #   test: /home/<username>/data_splits/tartan_drive/test/
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1
-  #   negative_mining: True
-  #   waypoint_spacing: 1
-  # sacson:
-  #   data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/
-  #   train: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/train/
-  #   test: /media/zjy/Elements SE/11111/UED_FLOW/sacson_test/test/
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1
-  #   negative_mining: True
-  #   waypoint_spacing: 1
   sacson:
     data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson/
     train: /media/zjy/Elements SE/11111/UED_FLOW/sacson/train/
@@ -134,7 +110,6 @@ datasets:
     goals_per_obs: 1
     negative_mining: True
     waypoint_spacing: 1  
-
   scand:
     data_folder: /media/zjy/Elements SE/11111/UED_FLOW/scand/
     train: /media/zjy/Elements SE/11111/UED_FLOW/scand/train/
@@ -143,7 +118,6 @@ datasets:
     goals_per_obs: 1
     negative_mining: True
     waypoint_spacing: 1  
-    
 
 # logging stuff
 ## =0 turns off

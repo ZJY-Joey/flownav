@@ -10,15 +10,13 @@ import torch.distributed as dist
 import torch.nn as nn
 import wandb
 import yaml
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import ConcatDataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from flownav.data.vint_dataset import ViNT_Dataset
-from flownav.models.nomad import DenseNetwork, NoMaD
-from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
+from flownav.models.factory import build_nomad_model, load_depth_encoder_weights
 from flownav.training.loop import main_loop
 from warmup_scheduler import GradualWarmupScheduler
 
@@ -238,27 +236,7 @@ def main(config: dict) -> None:
         )
 
     # Create the model
-    vision_encoder = NoMaD_ViNT(
-        obs_encoding_size=config["encoding_size"],
-        context_size=config["context_size"],
-        mha_num_attention_heads=config["mha_num_attention_heads"],
-        mha_num_attention_layers=config["mha_num_attention_layers"],
-        mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        depth_cfg=config["depth"],
-    )
-    vision_encoder = replace_bn_with_gn(vision_encoder)
-    noise_pred_net = ConditionalUnet1D(
-        input_dim=2,
-        global_cond_dim=config["encoding_size"],
-        down_dims=config["down_dims"],
-        cond_predict_scale=config["cond_predict_scale"],
-    )
-    dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-    model = NoMaD(
-        vision_encoder=vision_encoder,
-        noise_pred_net=noise_pred_net,
-        dist_pred_net=dist_pred_network,
-    )
+    model = build_nomad_model(config)
     lr = float(config["lr"])
     config["optimizer"] = config["optimizer"].lower()
     optimizer = None
@@ -277,24 +255,7 @@ def main(config: dict) -> None:
 
     # Load Depth-Anything pre-trained weights before an optional FlowNav checkpoint,
     # so resumed/evaluated checkpoints keep their trained depth encoder weights.
-    checkpoint = torch.load(
-        config["depth"]["weights_path"],
-        map_location=device,
-    )
-    saved_state_dict = (
-        checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    )
-    updated_state_dict = {
-        k.replace("pretrained.", ""): v
-        for k, v in saved_state_dict.items()
-        if "pretrained" in k
-    }
-    new_state_dict = {
-        k: v
-        for k, v in updated_state_dict.items()
-        if k in model.vision_encoder.depth_encoder.state_dict()
-    }
-    model.vision_encoder.depth_encoder.load_state_dict(new_state_dict, strict=False)
+    load_depth_encoder_weights(model, config["depth"]["weights_path"], device)
 
     # Load pre-trained model if specified
     current_epoch = 0
