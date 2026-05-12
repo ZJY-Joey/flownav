@@ -281,6 +281,8 @@ def direction_tasks(args) -> list[EvalTask]:
                 str(args.global_metric_max_points_per_class),
                 "--output-dir",
                 args.log_root,
+                "--output-variant",
+                args.variant,
                     ],
                 )
             )
@@ -338,6 +340,8 @@ def heading_tasks(args) -> list[EvalTask]:
                 str(args.global_metric_max_points_per_class),
                 "--output-dir",
                 args.log_root,
+                "--output-variant",
+                args.variant,
                     ],
                 )
             )
@@ -391,6 +395,8 @@ def horizon_tasks(args) -> list[EvalTask]:
                 str(args.global_metric_max_points_per_class),
                 "--output-dir",
                 str(Path(args.horizon_root) / bucket),
+                "--output-variant",
+                args.variant,
             ]
             if max_dist is not None:
                 cmd += ["--max-goal-pos-dist", str(max_dist)]
@@ -481,6 +487,8 @@ def mask_tasks(args) -> list[EvalTask]:
             str(args.global_endpoint_max_points_per_class),
             "--output-dir",
             args.log_root,
+            "--output-variant",
+            args.variant,
                 ],
             )
         )

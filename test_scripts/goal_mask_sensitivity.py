@@ -82,6 +82,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument(
+        "--output-variant",
+        default=None,
+        help=(
+            "Experiment variant subdirectory under --output-dir. Defaults to the "
+            "trajectory-selection variant for backward compatibility."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -438,6 +446,7 @@ def main() -> None:
     selection_output_root = output_root_for_selection(
         args.output_dir,
         args.trajectory_selection,
+        args.output_variant,
     )
     output_dir = ensure_output_dir(
         selection_output_root,
@@ -562,7 +571,8 @@ def main() -> None:
     summary = {
         "test": "goal_mask_sensitivity",
         "trajectory_selection": args.trajectory_selection,
-        "output_variant": SELECTION_VARIANTS[args.trajectory_selection],
+        "output_variant": args.output_variant or SELECTION_VARIANTS[args.trajectory_selection],
+        "trajectory_selection_variant": SELECTION_VARIANTS[args.trajectory_selection],
         "cluster_threshold": (
             args.cluster_threshold if args.trajectory_selection == "cluster" else None
         ),

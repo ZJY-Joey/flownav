@@ -48,13 +48,17 @@ def summary_variant(summary_path: Path, summary: dict) -> str:
     if summary.get("output_variant"):
         return summary["output_variant"]
     for part in summary_path.parts:
-        if part in VARIANT_ORDER:
+        if part.startswith("flownav_"):
             return part
     return "flownav_baseline"
 
 
-def path_has_variant(summary_path: Path, variant: str) -> bool:
-    return variant in summary_path.parts
+def matches_variant(summary_path: Path, summary: dict, variant: str, log_root: Path) -> bool:
+    if summary_variant(summary_path, summary) == variant:
+        return True
+    if variant in summary_path.parts or variant in log_root.parts:
+        return True
+    return any(variant in part for part in summary_path.parts)
 
 
 def load_summary_rows(log_root: Path, variant: str):
@@ -64,9 +68,7 @@ def load_summary_rows(log_root: Path, variant: str):
             summary = json.load(f)
         if summary.get("stage") != "all_samples":
             continue
-        if summary_variant(summary_path, summary) != variant and not path_has_variant(
-            summary_path, variant
-        ):
+        if not matches_variant(summary_path, summary, variant, log_root):
             continue
         run_dir = summary_path.parents[2]
         setting = "heading_filter" if summary.get("filter_goal_heading") else "no_heading_filter"
@@ -867,9 +869,7 @@ def load_mask_summary_rows(log_root: Path, variant: str, angle: int | None = Non
             summary = json.load(f)
         if summary.get("test") != "goal_mask_sensitivity":
             continue
-        if summary_variant(summary_path, summary) != variant and not path_has_variant(
-            summary_path, variant
-        ):
+        if not matches_variant(summary_path, summary, variant, log_root):
             continue
         if angle is not None and float(summary.get("angle_threshold_deg")) != float(angle):
             continue
@@ -1103,9 +1103,28 @@ def main():
     rows = load_summary_rows(log_root, args.variant)
     mask_rows = load_mask_summary_rows(log_root, args.variant, angle=args.main_angle)
     if not rows and not mask_rows:
-        raise RuntimeError(
-            f"No goal_swap or goal_mask_sensitivity summaries found for {args.variant} under {log_root}"
+        missing_report = {
+            "variant": args.variant,
+            "swap": [],
+            "mask": [],
+            "notes": [
+                (
+                    "No goal_swap or goal_mask_sensitivity summaries found under "
+                    f"{log_root}. This is expected if direction/mask/heading were not run."
+                )
+            ],
+        }
+        missing_json_path, missing_md_path = write_missing_report(
+            output_dir,
+            missing_report,
         )
+        print(
+            f"No goal_swap or goal_mask_sensitivity summaries found for {args.variant} "
+            f"under {log_root}; wrote missing report."
+        )
+        print(missing_json_path)
+        print(missing_md_path)
+        return
 
     missing_report = build_missing_report(rows, mask_rows, args)
     missing_json_path, missing_md_path = write_missing_report(output_dir, missing_report)
