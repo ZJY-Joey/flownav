@@ -101,13 +101,14 @@ Process-to-figure map:
 | process | Purpose | Calls | Main Outputs |
 | --- | --- | --- | --- |
 | `direction` | Flow-head sensitivity to left/forward/right goal swaps | `goal_swap_visualization.py`, `generate_summary_figures.py` | `fig2_all_vs_anomaly_angle10.png`, `fig2_all_vs_anomaly_angle15.png`, `fig3_hard_case_gallery_angle10.png` |
-| `horizon` | Flow/dist-head sensitivity across goal-offset buckets | horizon-filtered `goal_swap_visualization.py`, `dist_head_backfill.py`, `generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`, `fig_flow_vs_dist_sensitivity_by_horizon.png`, `fig_endpoint_goal_distribution_by_horizon.png`, `fig_endpoint_mmd_emd_by_horizon.png` |
+| `horizon` | Flow/dist-head sensitivity across local metric goal-distance buckets | horizon-filtered `goal_swap_visualization.py`, `dist_head_backfill.py`, `generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`, `fig_flow_vs_dist_sensitivity_by_horizon.png`, `fig_endpoint_goal_distribution_by_horizon.png`, `fig_endpoint_mmd_emd_by_horizon.png` |
 | `mask` | With-goal vs masked-goal GC/UC distributions | `goal_mask_sensitivity.py`, `generate_summary_figures.py` | `fig6_goal_mask_direction_distribution_comparison.png`, `fig6_goal_mask_mmd_emd_delta.png` |
 | `heading` | Heading-filter effect only; no cluster run | heading-filter `goal_swap_visualization.py`, `generate_summary_figures.py` | `fig5_paired_improvement.png`; also fills heading-filter summaries |
 | `subgoal` | Deployment-style local subgoal collapse at short ranges | `recon_head_horizon_summary.py` | `fig_recon_head_horizon_distribution.png`, `fig_recon_head_horizon_local_subgoals.png`, `fig_recon_head_horizon_subgoal_conditioned_flow.png` |
 
 Defaults: datasets are `go_stanford recon sacson`; angles are `10 15`; horizon
-offset buckets are `short=4-7`, `mid=8-12`, and `long=13-19`, matching
+buckets are local metric goal-distance buckets in the robot frame:
+`short=0-2m`, `mid=2-6m`, and `long=>=6m`, matching
 `generate_head_horizon_figures.py`.
 
 Existing outputs are skipped by default. Force regeneration when checkpoint or

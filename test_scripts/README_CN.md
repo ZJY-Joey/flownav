@@ -89,13 +89,14 @@ python3 test_scripts/run_goal_condition_suite.py \
 | process | 主要目的 | 会调用 | 主要输出 |
 | --- | --- | --- | --- |
 | `direction` | flow head 对 left/forward/right goal swap 是否敏感 | `goal_swap_visualization.py`，`generate_summary_figures.py` | `fig2_all_vs_anomaly_angle10.png`，`fig2_all_vs_anomaly_angle15.png`，`fig3_hard_case_gallery_angle10.png` |
-| `horizon` | flow/dist head 对不同 goal offset bucket 是否敏感 | horizon-filtered `goal_swap_visualization.py`，`dist_head_backfill.py`，`generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`，`fig_flow_vs_dist_sensitivity_by_horizon.png`，`fig_endpoint_goal_distribution_by_horizon.png`，`fig_endpoint_mmd_emd_by_horizon.png` |
+| `horizon` | flow/dist head 对不同机器人局部坐标系 goal 欧式距离 bucket 是否敏感 | horizon-filtered `goal_swap_visualization.py`，`dist_head_backfill.py`，`generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`，`fig_flow_vs_dist_sensitivity_by_horizon.png`，`fig_endpoint_goal_distribution_by_horizon.png`，`fig_endpoint_mmd_emd_by_horizon.png` |
 | `mask` | with-goal 和 masked-goal 的 GC/UC 分布差异 | `goal_mask_sensitivity.py`，`generate_summary_figures.py` | `fig6_goal_mask_direction_distribution_comparison.png`，`fig6_goal_mask_mmd_emd_delta.png` |
 | `heading` | heading filter 的影响；不跑 cluster | heading-filter `goal_swap_visualization.py`，`generate_summary_figures.py` | `fig5_paired_improvement.png`；也会补齐 heading-filter 版本的 summary |
 | `subgoal` | deployment-style local subgoal 是否在近距离 collapse | `recon_head_horizon_summary.py` | `fig_recon_head_horizon_distribution.png`，`fig_recon_head_horizon_local_subgoals.png`，`fig_recon_head_horizon_subgoal_conditioned_flow.png` |
 
-默认数据集是 `go_stanford recon sacson`，默认角度是 `10 15`。默认 horizon offset bucket 为
-`short=4-7`、`mid=8-12`、`long=13-19`，和 `generate_head_horizon_figures.py` 的 bucket 定义一致。
+默认数据集是 `go_stanford recon sacson`，默认角度是 `10 15`。默认 horizon bucket 使用机器人局部坐标系下
+goal 的欧式距离：`short=0-2m`、`mid=2-6m`、`long=>=6m`，和
+`generate_head_horizon_figures.py` 的 bucket 定义一致。
 
 默认跳过已有输出。如果你修改了 checkpoint 或参数，需要强制重跑：
 

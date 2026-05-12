@@ -11,9 +11,9 @@ from pathlib import Path
 DEFAULT_DATASETS = ("go_stanford", "recon", "sacson")
 DEFAULT_ANGLES = (10, 15)
 HORIZON_BUCKETS = {
-    "short": (4, 7),
-    "mid": (8, 12),
-    "long": (13, 19),
+    "short": (0.0, 2.0),
+    "mid": (2.0, 6.0),
+    "long": (6.0, None),
 }
 PROCESSES = ("direction", "horizon", "mask", "heading", "subgoal")
 
@@ -175,6 +175,34 @@ def has_horizon_swap_summary(args, bucket: str, dataset: str) -> bool:
     return latest(run_dir.glob("goal_swap_visualization_summary_*.json")) is not None
 
 
+def has_metric_horizon_swap_summary(args, bucket: str, dataset: str) -> bool:
+    run_dir = (
+        Path(args.horizon_root)
+        / bucket
+        / args.variant
+        / dataset
+        / "goal_swap_visualization"
+        / (
+            f"{angle_tag(args.main_angle)}-"
+            f"mmd{threshold_tag(args.anomaly_mmd_threshold)}-"
+            f"emd{threshold_tag(args.anomaly_emd_threshold)}"
+        )
+        / "all_samples"
+        / "no_heading_filter"
+    )
+    summary_path = latest(run_dir.glob("goal_swap_visualization_summary_*.json"))
+    if summary_path is None:
+        return False
+    try:
+        import json
+
+        with open(summary_path, "r") as f:
+            summary = json.load(f)
+    except Exception:
+        return False
+    return summary.get("min_goal_pos_dist") is not None or summary.get("max_goal_pos_dist") is not None
+
+
 def has_mask_summary(args, root: Path, dataset: str, angle: float) -> bool:
     mask_dir = (
         root
@@ -324,15 +352,12 @@ def run_heading_process(args) -> None:
 
 def horizon_tasks(args) -> list[EvalTask]:
     tasks = []
-    for bucket, (min_offset, max_offset) in HORIZON_BUCKETS.items():
+    for bucket, (min_dist, max_dist) in HORIZON_BUCKETS.items():
         for dataset in args.datasets:
-            if not args.force and has_horizon_swap_summary(args, bucket, dataset):
+            if not args.force and has_metric_horizon_swap_summary(args, bucket, dataset):
                 log(f"skip horizon bucket={bucket} dataset={dataset}: existing summary")
                 continue
-            tasks.append(
-                EvalTask(
-                    name=f"horizon bucket={bucket} dataset={dataset}",
-                    cmd=[
+            cmd = [
                 sys.executable,
                 "test_scripts/goal_swap_visualization.py",
                 *common_model_args(args),
@@ -350,10 +375,8 @@ def horizon_tasks(args) -> list[EvalTask]:
                 str(args.main_angle),
                 "--max-direction-angle-deg",
                 str(args.max_direction_angle_deg),
-                "--min-goal-offset",
-                str(min_offset),
-                "--max-goal-offset",
-                str(max_offset),
+                "--min-goal-pos-dist",
+                str(min_dist),
                 "--anomaly-mmd-threshold",
                 str(args.anomaly_mmd_threshold),
                 "--anomaly-emd-threshold",
@@ -368,7 +391,13 @@ def horizon_tasks(args) -> list[EvalTask]:
                 str(args.global_metric_max_points_per_class),
                 "--output-dir",
                 str(Path(args.horizon_root) / bucket),
-                    ],
+            ]
+            if max_dist is not None:
+                cmd += ["--max-goal-pos-dist", str(max_dist)]
+            tasks.append(
+                EvalTask(
+                    name=f"horizon bucket={bucket} dataset={dataset}",
+                    cmd=cmd,
                 )
             )
     return tasks

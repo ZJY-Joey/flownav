@@ -10,9 +10,9 @@ import numpy as np
 
 DATASET_ORDER = ["go_stanford", "recon", "sacson"]
 HORIZON_BUCKETS = {
-    "short": (4, 7),
-    "mid": (8, 12),
-    "long": (13, 19),
+    "short": (0.0, 2.0),
+    "mid": (2.0, 6.0),
+    "long": (6.0, None),
 }
 HORIZON_ORDER = ["short", "mid", "long"]
 SWAP_METRICS = [
@@ -38,9 +38,13 @@ def summary_variant(summary_path: Path, summary: dict) -> str:
     if summary.get("output_variant"):
         return summary["output_variant"]
     for part in summary_path.parts:
-        if part in ["flownav_baseline", "flownav_cluster"]:
+        if part.startswith("flownav_"):
             return part
     return "flownav_baseline"
+
+
+def path_has_variant(summary_path: Path, variant: str) -> bool:
+    return variant in summary_path.parts
 
 
 def finite_mean(values):
@@ -137,7 +141,9 @@ def load_swap_bucket_rows(horizon_root: Path, variant: str):
                 continue
             if summary.get("filter_goal_heading") is not False:
                 continue
-            if summary_variant(summary_path, summary) != variant:
+            if summary_variant(summary_path, summary) != variant and not path_has_variant(
+                summary_path, variant
+            ):
                 continue
             metrics = summary.get("metrics", [])
             row = {
@@ -344,7 +350,9 @@ def find_endpoint_distribution_images(horizon_root: Path, variant: str):
                 continue
             if summary.get("filter_goal_heading") is not False:
                 continue
-            if summary_variant(summary_path, summary) != variant:
+            if summary_variant(summary_path, summary) != variant and not path_has_variant(
+                summary_path, variant
+            ):
                 continue
             image_path = latest_path(
                 summary_path.parent.glob("goal_swap_global_endpoints_*.png")
@@ -481,7 +489,9 @@ def plot_endpoint_goal_distribution_collage(rows, output_path: Path):
             dist_min = record.get("min_goal_pos_dist")
             dist_max = record.get("max_goal_pos_dist")
             if dist_min is not None or dist_max is not None:
-                range_text = f"dist {dist_min}-{dist_max}m"
+                lower = "0" if dist_min is None else f"{float(dist_min):g}"
+                upper = "inf" if dist_max is None else f"{float(dist_max):g}"
+                range_text = f"local dist {lower}-{upper}m"
             else:
                 range_text = (
                     f"offset {record.get('min_goal_offset')}-"
@@ -492,7 +502,7 @@ def plot_endpoint_goal_distribution_collage(rows, output_path: Path):
                 fontsize=10,
             )
     fig.suptitle(
-        "Flow endpoint and goal-position distributions by goal-offset bucket",
+        "Flow endpoint and goal-position distributions by local goal-distance bucket",
         fontsize=15,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))

@@ -53,6 +53,10 @@ def summary_variant(summary_path: Path, summary: dict) -> str:
     return "flownav_baseline"
 
 
+def path_has_variant(summary_path: Path, variant: str) -> bool:
+    return variant in summary_path.parts
+
+
 def load_summary_rows(log_root: Path, variant: str):
     rows = []
     for summary_path in sorted(log_root.rglob("goal_swap_visualization_summary_*.json")):
@@ -60,7 +64,9 @@ def load_summary_rows(log_root: Path, variant: str):
             summary = json.load(f)
         if summary.get("stage") != "all_samples":
             continue
-        if summary_variant(summary_path, summary) != variant:
+        if summary_variant(summary_path, summary) != variant and not path_has_variant(
+            summary_path, variant
+        ):
             continue
         run_dir = summary_path.parents[2]
         setting = "heading_filter" if summary.get("filter_goal_heading") else "no_heading_filter"
@@ -861,7 +867,9 @@ def load_mask_summary_rows(log_root: Path, variant: str, angle: int | None = Non
             summary = json.load(f)
         if summary.get("test") != "goal_mask_sensitivity":
             continue
-        if summary_variant(summary_path, summary) != variant:
+        if summary_variant(summary_path, summary) != variant and not path_has_variant(
+            summary_path, variant
+        ):
             continue
         if angle is not None and float(summary.get("angle_threshold_deg")) != float(angle):
             continue
@@ -1072,7 +1080,6 @@ def parse_args():
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--variant",
-        choices=VARIANT_ORDER,
         default="flownav_baseline",
         help="Which test_logs variant to summarize.",
     )

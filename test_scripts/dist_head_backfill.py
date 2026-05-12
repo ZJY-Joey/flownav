@@ -441,7 +441,7 @@ def parse_args():
     )
     parser.add_argument("--summary-path", action="append", default=[])
     parser.add_argument("--log-root", default="test_logs")
-    parser.add_argument("--variant", choices=VARIANT_ORDER, default="flownav_baseline")
+    parser.add_argument("--variant", default="flownav_baseline")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--split", default=None)
     parser.add_argument("--angle", type=float, default=None)
