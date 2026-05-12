@@ -395,9 +395,17 @@ def summary_variant(summary_path: Path, summary: dict):
     if summary.get("output_variant"):
         return summary["output_variant"]
     for part in summary_path.parts:
-        if part in VARIANT_ORDER:
+        if part.startswith("flownav_"):
             return part
     return "flownav_baseline"
+
+
+def matches_variant(path: Path, summary: dict, variant: str, log_root: Path) -> bool:
+    if summary_variant(path, summary) == variant:
+        return True
+    if variant in path.parts or variant in log_root.parts:
+        return True
+    return any(variant in part for part in path.parts)
 
 
 def discover_summaries(args):
@@ -412,7 +420,7 @@ def discover_summaries(args):
             continue
         if summary.get("stage") != "all_samples":
             continue
-        if summary_variant(path, summary) != args.variant:
+        if not matches_variant(path, summary, args.variant, log_root):
             continue
         if args.dataset and summary.get("dataset") != args.dataset:
             continue
@@ -462,6 +470,9 @@ def main():
     args = parse_args()
     summaries = discover_summaries(args)
     if not summaries:
+        if args.keep_going:
+            log("No matching goal_swap all_samples summaries found; skipping.")
+            return
         raise RuntimeError("No matching goal_swap all_samples summaries found.")
     log(f"Found {len(summaries)} goal-swap summaries for dist backfill.")
     outputs = []

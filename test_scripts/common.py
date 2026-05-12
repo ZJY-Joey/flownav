@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -78,7 +79,14 @@ def get_device(device_arg: Optional[str]) -> torch.device:
 
 def build_model(config: dict, checkpoint_path: str, device: torch.device) -> NoMaD:
     model = build_nomad_model(config)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    except pickle.UnpicklingError:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
     state_dict = (
         checkpoint["model"]
         if isinstance(checkpoint, dict) and "model" in checkpoint
