@@ -23,7 +23,10 @@ from common import (
     timestamp_name,
     write_json,
 )
-from flownav.training.utils import cluster_trajectory_samples
+try:
+    from flownav.training.utils import cluster_trajectory_samples
+except ImportError:
+    cluster_trajectory_samples = None
 
 
 DIRECTIONS = ("left", "forward", "right")
@@ -243,6 +246,12 @@ def output_root_for_selection(output_dir: str, trajectory_selection: str) -> str
 
 
 def select_clustered_trajectories(trajectories, cluster_threshold: float):
+    if cluster_trajectory_samples is None:
+        raise ImportError(
+            "cluster trajectory selection requires "
+            "flownav.training.utils.cluster_trajectory_samples, but it is not "
+            "available in this checkout. Use --trajectory-selection baseline."
+        )
     selected = {}
     selection_info = {}
     for name, samples in trajectories.items():

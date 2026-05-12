@@ -4,8 +4,8 @@ run_name: flownav_baseline0507
 
 # training setup
 use_wandb: True # set to false if you don't want to log to wandb
-train: True
-use_amp: True
+train: False
+use_amp: False
 use_ddp: True # set True and launch with torchrun for multi-GPU training
 dist_backend: nccl
 batch_size: 128 # per GPU/process when use_ddp=True
@@ -48,7 +48,7 @@ down_dims: [64, 128, 256]
 obs_type: image
 goal_type: image
 
-# load_run: "flownav0421"
+load_run: "flownav0511"
 
 # depth
 depth:

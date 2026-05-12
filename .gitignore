@@ -160,3 +160,4 @@ logs
 depth_anything_weights
 flownav/config/*server*.yaml
 
+test_logs/
