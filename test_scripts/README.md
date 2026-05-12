@@ -18,6 +18,7 @@ Chinese documentation: [README_CN.md](README_CN.md).
 
 Current active scope:
 
+- `run_goal_condition_suite.py`
 - `goal_swap_visualization.py`
 - `dist_head_backfill.py`
 - `topomap_subgoal_analysis.py`
@@ -38,6 +39,96 @@ Use these archived scripts only if you have checked their assumptions and
 outputs manually. New changes should target the active goal-swap and
 goal-mask-sensitivity pipelines unless there is an explicit reason to revive one
 of the archived tests.
+
+## Recommended Entry Point: Goal Condition Suite
+
+File: `run_goal_condition_suite.py`
+
+This script organizes the maintained goal-condition evaluation into five
+selectable processes. It does not reimplement inference; it orchestrates the
+active scripts below, reuses existing summaries/figures by default, and avoids
+rerunning duplicated flow sampling when outputs already exist. The suite
+intentionally does **not** run the cluster trajectory-selection variant; all
+flow metrics use baseline sampled trajectories.
+
+Run all five processes:
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --output-dir test_logs/flownav0511_eval \
+  --horizon-output-dir test_logs_horizon/flownav0511_eval
+```
+
+Run one process:
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --process direction
+```
+
+Run several selected processes:
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --process direction \
+  --process horizon \
+  --process mask
+```
+
+Preview commands without running them:
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --dry-run
+```
+
+Output path options:
+
+- `--output-dir`: root for direction / mask / heading outputs; alias of `--log-root`.
+- `--horizon-output-dir`: root for horizon / subgoal outputs; alias of `--horizon-root`.
+
+Files are still organized below each root as `<variant>/<dataset>/<script_name>/...`.
+
+Process-to-figure map:
+
+| process | Purpose | Calls | Main Outputs |
+| --- | --- | --- | --- |
+| `direction` | Flow-head sensitivity to left/forward/right goal swaps | `goal_swap_visualization.py`, `generate_summary_figures.py` | `fig2_all_vs_anomaly_angle10.png`, `fig2_all_vs_anomaly_angle15.png`, `fig3_hard_case_gallery_angle10.png` |
+| `horizon` | Flow/dist-head sensitivity across goal-offset buckets | horizon-filtered `goal_swap_visualization.py`, `dist_head_backfill.py`, `generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`, `fig_flow_vs_dist_sensitivity_by_horizon.png`, `fig_endpoint_goal_distribution_by_horizon.png`, `fig_endpoint_mmd_emd_by_horizon.png` |
+| `mask` | With-goal vs masked-goal GC/UC distributions | `goal_mask_sensitivity.py`, `generate_summary_figures.py` | `fig6_goal_mask_direction_distribution_comparison.png`, `fig6_goal_mask_mmd_emd_delta.png` |
+| `heading` | Heading-filter effect only; no cluster run | heading-filter `goal_swap_visualization.py`, `generate_summary_figures.py` | `fig5_paired_improvement.png`; also fills heading-filter summaries |
+| `subgoal` | Deployment-style local subgoal collapse at short ranges | `recon_head_horizon_summary.py` | `fig_recon_head_horizon_distribution.png`, `fig_recon_head_horizon_local_subgoals.png`, `fig_recon_head_horizon_subgoal_conditioned_flow.png` |
+
+Defaults: datasets are `go_stanford recon sacson`; angles are `10 15`; horizon
+offset buckets are `short=4-7`, `mid=8-12`, and `long=13-19`, matching
+`generate_head_horizon_figures.py`.
+
+Existing outputs are skipped by default. Force regeneration when checkpoint or
+parameters change:
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --force
+```
+
+Useful low-cost smoke-test options:
+
+```bash
+--datasets recon
+--scan-batches 20
+--horizon-scan-batches 20
+--subgoal-scan-batches 20
+--num-samples 4
+--subgoal-num-flow-samples 4
+```
 
 ## Output Layout
 

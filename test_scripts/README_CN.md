@@ -14,6 +14,7 @@
 
 当前主动维护范围：
 
+- `run_goal_condition_suite.py`
 - `goal_swap_visualization.py`
 - `dist_head_backfill.py`
 - `topomap_subgoal_analysis.py`
@@ -29,6 +30,91 @@
 - `goal_separation_ratio.py`
 
 如果之后要重新使用这些脚本，需要先重新检查它们的样本构造假设、输出路径和指标解释。除非明确需要恢复某个 archived test，后续改动默认只围绕 active 的 goal-swap 和 goal-mask-sensitivity pipeline。
+
+## 推荐统一入口：Goal Condition Suite
+
+脚本：`run_goal_condition_suite.py`
+
+这个脚本把当前论文/报告中常用的 goal-condition 评测整理成 5 个可选 process。它本身不重新实现模型推理，
+而是按依赖关系调用已有 active scripts，并且默认复用已经存在的 summary/figure，避免重复跑相同的 flow
+sampling。当前 suite **不跑 cluster trajectory-selection**；所有 flow 指标都使用 baseline sampled trajectories。
+
+如果不传 `--process`，默认依次跑完 5 个 process：
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --output-dir test_logs/flownav0511_baseline \
+  --horizon-output-dir test_logs_horizon/flownav0511_baseline
+```
+
+只跑某一类图：
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --process direction
+```
+
+可以重复传 `--process`：
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --config flownav/config/flownav.yaml \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --process direction \
+  --process horizon \
+  --process mask
+```
+
+先打印将执行的命令，不真正运行：
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --dry-run
+```
+
+保存路径入口：
+
+- `--output-dir`：普通 direction / mask / heading 输出根目录；等价于 `--log-root`。
+- `--horizon-output-dir`：horizon / subgoal 输出根目录；等价于 `--horizon-root`。
+
+最终仍会在对应根目录下按 `<variant>/<dataset>/<script_name>/...` 组织文件。
+
+5 个 process 和主要输出图对应关系：
+
+| process | 主要目的 | 会调用 | 主要输出 |
+| --- | --- | --- | --- |
+| `direction` | flow head 对 left/forward/right goal swap 是否敏感 | `goal_swap_visualization.py`，`generate_summary_figures.py` | `fig2_all_vs_anomaly_angle10.png`，`fig2_all_vs_anomaly_angle15.png`，`fig3_hard_case_gallery_angle10.png` |
+| `horizon` | flow/dist head 对不同 goal offset bucket 是否敏感 | horizon-filtered `goal_swap_visualization.py`，`dist_head_backfill.py`，`generate_head_horizon_figures.py` | `fig_dist_pred_by_goal_pos_dist.png`，`fig_flow_vs_dist_sensitivity_by_horizon.png`，`fig_endpoint_goal_distribution_by_horizon.png`，`fig_endpoint_mmd_emd_by_horizon.png` |
+| `mask` | with-goal 和 masked-goal 的 GC/UC 分布差异 | `goal_mask_sensitivity.py`，`generate_summary_figures.py` | `fig6_goal_mask_direction_distribution_comparison.png`，`fig6_goal_mask_mmd_emd_delta.png` |
+| `heading` | heading filter 的影响；不跑 cluster | heading-filter `goal_swap_visualization.py`，`generate_summary_figures.py` | `fig5_paired_improvement.png`；也会补齐 heading-filter 版本的 summary |
+| `subgoal` | deployment-style local subgoal 是否在近距离 collapse | `recon_head_horizon_summary.py` | `fig_recon_head_horizon_distribution.png`，`fig_recon_head_horizon_local_subgoals.png`，`fig_recon_head_horizon_subgoal_conditioned_flow.png` |
+
+默认数据集是 `go_stanford recon sacson`，默认角度是 `10 15`。默认 horizon offset bucket 为
+`short=4-7`、`mid=8-12`、`long=13-19`，和 `generate_head_horizon_figures.py` 的 bucket 定义一致。
+
+默认跳过已有输出。如果你修改了 checkpoint 或参数，需要强制重跑：
+
+```bash
+python3 test_scripts/run_goal_condition_suite.py \
+  --checkpoint logs/flownav0511/ema_29.pth \
+  --force
+```
+
+常用降成本参数：
+
+```bash
+--datasets recon
+--scan-batches 20
+--horizon-scan-batches 20
+--subgoal-scan-batches 20
+--num-samples 4
+--subgoal-num-flow-samples 4
+```
 
 ## 输出目录结构
 
