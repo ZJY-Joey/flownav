@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 import yaml
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
@@ -27,8 +26,8 @@ from flownav.data.data_utils import (
     to_local_coords,
     yaw_rotmat,
 )
-from flownav.models.nomad import DenseNetwork, NoMaD
-from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
+from flownav.models.factory import build_nomad_model
+from flownav.models.nomad import NoMaD
 from flownav.training.utils import model_output
 from flownav.visualizing.plot import plot_trajs_and_points
 
@@ -78,28 +77,7 @@ def get_device(device_arg: Optional[str]) -> torch.device:
 
 
 def build_model(config: dict, checkpoint_path: str, device: torch.device) -> NoMaD:
-    vision_encoder = NoMaD_ViNT(
-        obs_encoding_size=config["encoding_size"],
-        context_size=config["context_size"],
-        mha_num_attention_heads=config["mha_num_attention_heads"],
-        mha_num_attention_layers=config["mha_num_attention_layers"],
-        mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        depth_cfg=config["depth"],
-    )
-    vision_encoder = replace_bn_with_gn(vision_encoder)
-    noise_pred_net = ConditionalUnet1D(
-        input_dim=2,
-        global_cond_dim=config["encoding_size"],
-        down_dims=config["down_dims"],
-        cond_predict_scale=config["cond_predict_scale"],
-    )
-    dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-    model = NoMaD(
-        vision_encoder=vision_encoder,
-        noise_pred_net=noise_pred_net,
-        dist_pred_net=dist_pred_network,
-    )
-
+    model = build_nomad_model(config)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = (
         checkpoint["model"]
