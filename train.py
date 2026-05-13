@@ -260,7 +260,7 @@ def main(config: dict) -> None:
     # Load pre-trained model if specified
     current_epoch = 0
     checkpoint_state = None
-    if "load_run" in config:
+    if config.get("load_run"):
         load_project_folder = os.path.join("logs", config["load_run"])
         click.echo(
             click.style(
@@ -422,7 +422,7 @@ if __name__ == "__main__":
         click.echo(click.style(f">> Using config file: {args.config}", fg="yellow"))
 
     if bool(config.get("resume", False)):
-        if "load_run" not in config:
+        if not config.get("load_run"):
             raise ValueError("resume: True requires load_run to point to an existing run.")
         config["project_folder"] = os.path.join("logs", config["load_run"])
         config["run_name"] = os.path.basename(os.path.normpath(config["load_run"]))

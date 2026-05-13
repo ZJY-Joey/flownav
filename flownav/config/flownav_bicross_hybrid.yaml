@@ -1,0 +1,131 @@
+project_name: flownav
+entity: zengjiayi-joey
+run_name: flownav_bicross_hybrid
+
+# training setup
+use_wandb: True # set to false if you don't want to log to wandb
+train: True
+use_amp: True
+use_ddp: True # set True and launch with torchrun for multi-GPU training
+dist_backend: nccl
+batch_size: 128 # per GPU/process when use_ddp=True
+eval_batch_size: 128 # per GPU/process when use_ddp=True
+epochs: 30
+gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+num_workers: 8 # per GPU/process when use_ddp=True
+eval_num_workers: 4
+pin_memory: True
+persistent_workers: True
+prefetch_factor: 4
+train_drop_last: True
+eval_drop_last: False
+eval_shuffle: False
+find_unused_parameters: False
+lr: 1e-4
+optimizer: adamw
+clipping: False
+max_norm: 1.
+scheduler: "cosine"
+warmup: True 
+warmup_epochs: 4
+cyclic_period: 10
+plateau_patience: 3
+plateau_factor: 0.5
+seed: 0
+resume: False # set True with load_run to continue an interrupted run in-place
+load_run: null
+
+# model params
+model_type: nomad
+vision_encoder: nomad_vint_bicross_hybrid
+encoding_size: 256
+obs_encoder: efficientnet-b0
+attn_unet: False
+cond_predict_scale: False
+mha_num_attention_heads: 4
+mha_num_attention_layers: 4
+mha_ff_dim_factor: 4
+down_dims: [64, 128, 256]
+obs_type: image
+goal_type: image
+
+# depth
+depth:
+  depth_encoder: vits
+  dino_layer_idx: 
+    vits: [2, 5, 8, 11]
+  pool_dim: 64
+  out_dim: 
+    vits: 384
+  weights_path: depth_anything_weights/depth_anything_v2_vits.pth
+
+# mask 
+goal_mask_prob: 0.5
+
+# normalization for the action space
+normalize: True
+
+# context
+context_type: temporal
+context_size: 3 # 5
+alpha: 1e-4
+
+# distance bounds for distance and action and distance predictions 
+distance:
+  min_dist_cat: 0
+  max_dist_cat: 20
+action:
+  min_dist_cat: 3
+  max_dist_cat: 20
+
+# action output params
+len_traj_pred: 8
+learn_angle: False
+
+# dataset specific parameters
+image_size: [96, 96] # width, height
+datasets:
+  recon:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/recon
+    train: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/data_splits/recon/train # path to train folder with traj_names.txt
+    test: /media/zjy/Elements SE/11111/UED_FLOW/recon_dataset/datasets/data_splits/recon/test # path to train folder with traj_names.txt
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1 # how many goals are sampled per observation
+    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+    waypoint_spacing: 1
+  go_stanford:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford # datasets/stanford_go_new
+    train: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford/data_splits/go_stanford/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/go_stanford/data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2 # increase dataset size
+    negative_mining: True
+    waypoint_spacing: 1
+  sacson:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/sacson/
+    train: /media/zjy/Elements SE/11111/UED_FLOW/sacson/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/sacson/test/
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1
+    negative_mining: True
+    waypoint_spacing: 1  
+  scand:
+    data_folder: /media/zjy/Elements SE/11111/UED_FLOW/scand/
+    train: /media/zjy/Elements SE/11111/UED_FLOW/scand/train/
+    test: /media/zjy/Elements SE/11111/UED_FLOW/scand/test/
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1
+    negative_mining: True
+    waypoint_spacing: 1  
+
+# logging stuff
+## =0 turns off
+print_log_freq: 500 # in iterations
+image_log_freq: 0 #0 # in iterations
+num_images_log: 0 #0 
+pairwise_test_freq: 0 # in epochs
+eval_fraction: 0.1
+wandb_log_freq: 500 # in iterations
+eval_freq: 5 # in epochs
+selected_action_num_samples: 8
+selected_action_cluster_threshold: 0.35

@@ -4,6 +4,7 @@ from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1
 from flownav.models.nomad import DenseNetwork, NoMaD
 from flownav.models.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
 from flownav.models.nomad_vint_bicross import NoMaD_ViNT_BiCross
+from flownav.models.nomad_vint_bicross_hybrid import NoMaD_ViNT_BiCrossHybrid
 
 
 def build_vision_encoder(config: dict) -> torch.nn.Module:
@@ -22,6 +23,8 @@ def build_vision_encoder(config: dict) -> torch.nn.Module:
         vision_encoder = NoMaD_ViNT(**common_kwargs)
     elif vision_encoder_name in {"nomad_vint_bicross", "bicross"}:
         vision_encoder = NoMaD_ViNT_BiCross(**common_kwargs)
+    elif vision_encoder_name in {"nomad_vint_bicross_hybrid", "bicross_hybrid"}:
+        vision_encoder = NoMaD_ViNT_BiCrossHybrid(**common_kwargs)
     else:
         raise ValueError(f"Unsupported vision_encoder: {vision_encoder_name}")
 
