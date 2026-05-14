@@ -155,5 +155,8 @@ deployment/src/test/*
 deployment/src/explore_topomap/*
 conditional-flow-matching/
 wandb/
-test_logs/
-test_logs_hirozon/
+test_logs/*
+test_logs_hirozon/*
+*.csv
+*.json
+*.txt
